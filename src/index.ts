@@ -424,12 +424,27 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
           id: payload.server_name || 'minecraft',
           name: payload.server_name || 'Minecraft Server',
         }
+        // 构建 message 元素：优先用 @satorijs/element 创建真实 Element 实例，
+        // 以确保 Session.content getter 能正确返回文本（Element.prototype.toString 被调用）。
+        let elements: any[] = []
+        try {
+          // 动态加载，避免编译时类型导入问题
+          const E = require('@satorijs/element')
+          const ElementFn = E && (E.default || E)
+          if (payload.message && typeof ElementFn === 'function') {
+            elements = [ElementFn('text', { content: payload.message })]
+          }
+        } catch (e) {
+          // 回退为手动构造（不完美，但不会抛错）
+          if (payload.message) elements = [{ type: 'text', attrs: { content: payload.message } }]
+        }
+
         event.message = {
           id: payload.message_id || Date.now().toString(),
           content: payload.message || '',
           timestamp: (payload.timestamp || Date.now()) * 1000,
           user: event.user, // 现在 event.user 已经定义了
-          elements: [], // 让Session的content setter来处理
+          elements,
           createdAt: (payload.timestamp || Date.now()) * 1000,
           updatedAt: (payload.timestamp || Date.now()) * 1000,
         }

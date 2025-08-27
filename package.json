@@ -48,7 +48,7 @@
     },
     "description": {
       "en": "Minecraft adapter for Koishi with RCON and WebSocket support",
-      "zh": "Koishi �?Minecraft 适配器，支持 RCON �?WebSocket"
+      "zh": "Koishi �?Minecraft 适配器，支持 RCON �?WebSocket"
     }
   }
 }
