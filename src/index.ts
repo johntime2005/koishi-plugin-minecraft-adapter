@@ -1,5 +1,4 @@
 import { Adapter, Bot, Context, Logger, Schema, Session } from 'koishi'
-import Element from '@satorijs/element'
 import { Rcon } from 'rcon-client'
 import WebSocket from 'ws'
 
@@ -424,7 +423,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
           content: payload.message || '',
           timestamp: (payload.timestamp || Date.now()) * 1000,
           user: event.user, // 现在 event.user 已经定义了
-          elements: payload.message ? [Element('text', { content: payload.message })] : [],
+          elements: [], // 让Session的content setter来处理
           createdAt: (payload.timestamp || Date.now()) * 1000,
           updatedAt: (payload.timestamp || Date.now()) * 1000,
         }
