@@ -175,8 +175,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     }
     return states[state as keyof typeof states] || `UNKNOWN(${state})`
   }
-
-  private async connectWebSocket(bot: MinecraftBot<C>, wsConfig: NonNullable<MinecraftBotConfig['websocket']>) {
     const headers: Record<string, string> = {
       'x-self-name': bot.config.serverName || bot.selfId,
       ...(wsConfig.extraHeaders || {}),
@@ -194,27 +192,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     this.wsConnections.set(bot.selfId, ws)
     bot.ws = ws
 
-    // 添加连接状态监控
-    const connectionMonitor = setInterval(() => {
-      if (this.debug) {
-        logger.info(`[DEBUG] WebSocket state for bot ${bot.selfId}: ${ws.readyState} (${this.getWebSocketStateString(ws.readyState)})`)
-      }
-    }, 10000) // 每10秒检查一次状态
-
-    // 添加心跳检测
-    let heartbeatInterval: NodeJS.Timeout | null = null
-    const startHeartbeat = () => {
-      if (heartbeatInterval) clearInterval(heartbeatInterval)
-      heartbeatInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          if (this.debug) {
-            logger.info(`[DEBUG] Sending heartbeat ping for bot ${bot.selfId}`)
-          }
-          ws.ping()
-        }
-      }, 30000) // 每30秒发送一次心跳
-    }
-
     // 添加连接超时处理
     const connectionTimeout = setTimeout(() => {
       if (ws.readyState === WebSocket.CONNECTING) {
@@ -229,14 +206,11 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       logger.info(`WebSocket connected for bot ${bot.selfId}`)
       if (this.debug) {
         logger.info(`[DEBUG] WebSocket opened successfully for bot ${bot.selfId}`)
-        logger.info(`[DEBUG] WebSocket protocol: ${ws.protocol}`)
-        logger.info(`[DEBUG] WebSocket extensions: ${ws.extensions}`)
       }
       // 重置重连尝试次数
       this.reconnectAttempts.set(bot.selfId, 0)
       bot.online()
       clearTimeout(connectionTimeout)
-      startHeartbeat()
     })
 
     ws.on('message', (data: WebSocket.RawData) => {
@@ -286,13 +260,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
         logger.info(`[DEBUG] Close reason:`, reason.toString())
       }
       bot.offline()
-
-      // 清理心跳和监控
-      if (heartbeatInterval) {
-        clearInterval(heartbeatInterval)
-        heartbeatInterval = null
-      }
-      clearInterval(connectionMonitor)
 
       const attempts = this.reconnectAttempts.get(bot.selfId) || 0
       if (attempts < this.maxReconnectAttempts) {
@@ -425,19 +392,12 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   }
 
   async sendPrivateMessage(player: string, message: string): Promise<void> {
-    if (this.debug) {
-      logger.info(`[DEBUG] Sending private message to player ${player}: ${message}`)
-    }
-
     // 优先使用 WebSocket 发送
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
         const payload = {
           api: 'tell',
           data: { player, message }
-        }
-        if (this.debug) {
-          logger.info(`[DEBUG] Sending via WebSocket:`, payload)
         }
         ws.send(JSON.stringify(payload))
         return
@@ -448,9 +408,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     for (const [botId, rcon] of this.rconConnections) {
       try {
         const json = JSON.stringify([{ text: message }])
-        if (this.debug) {
-          logger.info(`[DEBUG] Sending via RCON: tellraw ${player} ${json}`)
-        }
         await rcon.send(`tellraw ${player} ${json}`)
         return
       } catch (error) {
@@ -462,19 +419,12 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   }
 
   async broadcast(message: string): Promise<void> {
-    if (this.debug) {
-      logger.info(`[DEBUG] Broadcasting message: ${message}`)
-    }
-
     // 优先使用 WebSocket 发送
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
         const payload = {
           api: 'broadcast',
           data: { message }
-        }
-        if (this.debug) {
-          logger.info(`[DEBUG] Broadcasting via WebSocket:`, payload)
         }
         ws.send(JSON.stringify(payload))
         return
@@ -484,9 +434,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     // 回退到 RCON
     for (const [botId, rcon] of this.rconConnections) {
       try {
-        if (this.debug) {
-          logger.info(`[DEBUG] Broadcasting via RCON: say ${message}`)
-        }
         await rcon.send(`say ${message}`)
         return
       } catch (error) {
@@ -498,10 +445,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   }
 
   async stop() {
-    if (this.debug) {
-      logger.info(`[DEBUG] Stopping MinecraftAdapter`)
-    }
-
+    // 关闭所有连接
     for (const [botId, ws] of this.wsConnections) {
       try {
         ws.close()
@@ -539,7 +483,7 @@ export namespace MinecraftAdapter {
       websocket: Schema.object({
         url: Schema.string().description('WebSocket 地址').required(),
         accessToken: Schema.string().description('访问令牌'),
-        extraHeaders: Schema.dict(Schema.string()).description('额外请求头'),
+        extraHeaders: Schema.dict(String).description('额外请求头'),
       }).description('WebSocket 配置'),
     })).description('机器人配置列表').default([]),
   })

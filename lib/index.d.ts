@@ -38,6 +38,8 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private reconnectInterval;
     private maxReconnectAttempts;
     constructor(ctx: C, config: MinecraftAdapterConfig);
+    private getWebSocketCloseCode;
+    private getWebSocketStateString;
     private connectWebSocket;
     private createSession;
     sendPrivateMessage(player: string, message: string): Promise<void>;
