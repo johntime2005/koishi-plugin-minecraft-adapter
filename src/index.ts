@@ -73,31 +73,32 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
   constructor(ctx: C, config: MinecraftAdapterConfig) {
     super(ctx)
-    this.debug = config.debug ?? false
-    this.reconnectInterval = config.reconnectInterval ?? 5000
-    this.maxReconnectAttempts = config.maxReconnectAttempts ?? 10
+    try {
+      this.debug = config.debug ?? false
+      this.reconnectInterval = config.reconnectInterval ?? 5000
+      this.maxReconnectAttempts = config.maxReconnectAttempts ?? 10
 
-    if (this.debug) {
-      logger.info(`[DEBUG] MinecraftAdapter initialized with config:`, {
-        debug: this.debug,
-        reconnectInterval: this.reconnectInterval,
-        maxReconnectAttempts: this.maxReconnectAttempts,
-        botCount: config.bots.length
-      })
-    }
+      if (this.debug) {
+        logger.info(`[DEBUG] MinecraftAdapter initialized with config:`, {
+          debug: this.debug,
+          reconnectInterval: this.reconnectInterval,
+          maxReconnectAttempts: this.maxReconnectAttempts,
+          botCount: config.bots.length
+        })
+      }
 
     // 为每个配置创建机器人
-    ctx.on('ready', async () => {
+  ctx.on('ready', async () => {
       if (this.debug) {
         logger.info(`[DEBUG] Koishi ready event triggered, initializing ${config.bots.length} bots`)
       }
 
-      for (const botConfig of config.bots) {
+  for (const botConfig of config.bots) {
         if (this.debug) {
           logger.info(`[DEBUG] Initializing bot ${botConfig.selfId}`)
         }
 
-        const bot = new MinecraftBot(ctx, botConfig)
+  const bot = new MinecraftBot(ctx, botConfig)
         bot.adapter = this
         this.bots.push(bot)
 
@@ -142,6 +143,11 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
         }
       }
     })
+    } catch (err) {
+      logger.error('MinecraftAdapter initialization failed:', err)
+      // rethrow so Koishi can report the plugin load failure with stack
+      throw err
+    }
   }
 
   private getWebSocketCloseCode(code: number): string {
