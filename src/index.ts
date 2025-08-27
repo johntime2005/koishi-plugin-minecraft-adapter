@@ -58,18 +58,45 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftB
 
 export interface MinecraftAdapterConfig {
   bots: MinecraftBotConfig[]
+  debug?: boolean
+  reconnectInterval?: number
+  maxReconnectAttempts?: number
 }
 
 export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
   private rconConnections = new Map<string, Rcon>()
   private wsConnections = new Map<string, WebSocket>()
+  private reconnectAttempts = new Map<string, number>()
+  private debug: boolean
+  private reconnectInterval: number
+  private maxReconnectAttempts: number
 
   constructor(ctx: C, config: MinecraftAdapterConfig) {
     super(ctx)
+    this.debug = config.debug ?? false
+    this.reconnectInterval = config.reconnectInterval ?? 5000
+    this.maxReconnectAttempts = config.maxReconnectAttempts ?? 10
+
+    if (this.debug) {
+      logger.info(`[DEBUG] MinecraftAdapter initialized with config:`, {
+        debug: this.debug,
+        reconnectInterval: this.reconnectInterval,
+        maxReconnectAttempts: this.maxReconnectAttempts,
+        botCount: config.bots.length
+      })
+    }
 
     // 为每个配置创建机器人
     ctx.on('ready', async () => {
+      if (this.debug) {
+        logger.info(`[DEBUG] Koishi ready event triggered, initializing ${config.bots.length} bots`)
+      }
+
       for (const botConfig of config.bots) {
+        if (this.debug) {
+          logger.info(`[DEBUG] Initializing bot ${botConfig.selfId}`)
+        }
+
         const bot = new MinecraftBot(ctx, botConfig)
         bot.adapter = this
         this.bots.push(bot)
@@ -77,6 +104,10 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
         // 初始化 RCON 连接
         if (botConfig.rcon) {
           try {
+            if (this.debug) {
+              logger.info(`[DEBUG] Connecting RCON for bot ${botConfig.selfId} to ${botConfig.rcon.host}:${botConfig.rcon.port}`)
+            }
+
             const rcon = await Rcon.connect({
               host: botConfig.rcon.host,
               port: botConfig.rcon.port,
@@ -88,12 +119,26 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
             logger.info(`RCON connected for bot ${botConfig.selfId}`)
           } catch (error) {
             logger.warn(`Failed to connect RCON for bot ${botConfig.selfId}:`, error)
+            if (this.debug) {
+              logger.info(`[DEBUG] RCON connection error details:`, error.message, error.stack)
+            }
+          }
+        } else {
+          if (this.debug) {
+            logger.info(`[DEBUG] No RCON config for bot ${botConfig.selfId}`)
           }
         }
 
         // 初始化 WebSocket 连接
         if (botConfig.websocket) {
+          if (this.debug) {
+            logger.info(`[DEBUG] Initializing WebSocket for bot ${botConfig.selfId}`)
+          }
           await this.connectWebSocket(bot, botConfig.websocket)
+        } else {
+          if (this.debug) {
+            logger.info(`[DEBUG] No WebSocket config for bot ${botConfig.selfId}`)
+          }
         }
       }
     })
@@ -108,49 +153,42 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       headers['Authorization'] = `Bearer ${wsConfig.accessToken}`
     }
 
+    if (this.debug) {
+      logger.info(`[DEBUG] Connecting to WebSocket: ${wsConfig.url}`)
+      logger.info(`[DEBUG] Headers:`, headers)
+    }
+
     const ws = new WebSocket(wsConfig.url, { headers })
     this.wsConnections.set(bot.selfId, ws)
     bot.ws = ws
 
+    // 添加连接超时处理
+    const connectionTimeout = setTimeout(() => {
+      if (ws.readyState === WebSocket.CONNECTING) {
+        if (this.debug) {
+          logger.info(`[DEBUG] WebSocket connection timeout for bot ${bot.selfId}`)
+        }
+        ws.close()
+      }
+    }, 10000) // 10秒超时
+
     ws.on('open', () => {
       logger.info(`WebSocket connected for bot ${bot.selfId}`)
-      bot.online()
-    })
-
-    ws.on('message', (data: WebSocket.RawData) => {
-      try {
-        const text = data.toString('utf8')
-        const obj = JSON.parse(text)
-        const type = obj.type || obj.event || 'unknown'
-        const payload = obj.data ?? obj
-
-        const session = this.createSession(bot, type, payload)
-        if (session) {
-          bot.dispatch(session)
-        }
-      } catch (error) {
-        logger.warn('Failed to process WebSocket message:', error)
+      if (this.debug) {
+        logger.info(`[DEBUG] WebSocket opened successfully for bot ${bot.selfId}`)
       }
-    })
-
-    ws.on('close', () => {
-      logger.warn(`WebSocket disconnected for bot ${bot.selfId}`)
-      bot.offline()
-      // 自动重连
-      setTimeout(() => {
-        if (!this.wsConnections.has(bot.selfId)) {
-          logger.info(`Attempting to reconnect WebSocket for bot ${bot.selfId}`)
-          this.connectWebSocket(bot, wsConfig)
-        }
-      }, 5000)
-    })
-
-    ws.on('error', (error) => {
-      logger.warn(`WebSocket error for bot ${bot.selfId}:`, error)
+      // 重置重连尝试次数
+      this.reconnectAttempts.set(bot.selfId, 0)
+      bot.online()
+      clearTimeout(connectionTimeout)
     })
   }
 
   private createSession(bot: MinecraftBot<C>, type: string, payload: any): Session | undefined {
+    if (this.debug) {
+      logger.info(`[DEBUG] Creating session for event type: ${type}, payload:`, payload)
+    }
+
     switch (type) {
       case 'chat':
       case 'player_chat':
@@ -231,6 +269,9 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
       default:
         // 自定义事件可以通过其他方式处理
+        if (this.debug) {
+          logger.info(`[DEBUG] Unhandled event type: ${type}, payload:`, payload)
+        }
         logger.debug(`Unhandled event type: ${type}`, payload)
         return undefined
     }
@@ -313,6 +354,9 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
 export namespace MinecraftAdapter {
   export const Config: Schema<MinecraftAdapterConfig> = Schema.object({
+    debug: Schema.boolean().description('启用调试模式，输出详细日志').default(false),
+    reconnectInterval: Schema.number().description('重连间隔时间(ms)').default(5000),
+    maxReconnectAttempts: Schema.number().description('最大重连尝试次数').default(10),
     bots: Schema.array(Schema.object({
       selfId: Schema.string().description('机器人 ID').required(),
       serverName: Schema.string().description('服务器名称'),

@@ -26,10 +26,17 @@ export declare class MinecraftBot<C extends Context = Context> extends Bot<C, Mi
 }
 export interface MinecraftAdapterConfig {
     bots: MinecraftBotConfig[];
+    debug?: boolean;
+    reconnectInterval?: number;
+    maxReconnectAttempts?: number;
 }
 export declare class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
     private rconConnections;
     private wsConnections;
+    private reconnectAttempts;
+    private debug;
+    private reconnectInterval;
+    private maxReconnectAttempts;
     constructor(ctx: C, config: MinecraftAdapterConfig);
     private connectWebSocket;
     private createSession;

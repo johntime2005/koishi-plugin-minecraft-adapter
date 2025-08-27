@@ -21,10 +21,19 @@ npm install koishi-plugin-minecraft-adapter
 适配器支持以下配置选项：
 
 ### 基本配置
-- `serverName`: 服务器名称，用于标识不同的 Minecraft 服务器
-- `platform`: 平台标识符，默认为 'minecraft'
+- `debug`: 启用调试模式，输出详细的连接和消息日志
+- `reconnectInterval`: 重连间隔时间(毫秒)，默认为5000ms
+- `maxReconnectAttempts`: 最大重连尝试次数，默认为10次
+- `bots`: 机器人配置列表
 
-### RCON 配置
+### 机器人配置
+每个机器人可以配置以下选项：
+
+#### 基本信息
+- `selfId`: 机器人ID（必需）
+- `serverName`: 服务器名称
+
+#### RCON 配置
 ```yaml
 rcon:
   enabled: true
@@ -34,7 +43,7 @@ rcon:
   timeout: 5000
 ```
 
-### WebSocket 配置
+#### WebSocket 配置
 ```yaml
 websocket:
   enabled: true
@@ -90,11 +99,34 @@ ctx.on('guild-member-removed', (session) => {
 - `death` / `player_death`: 玩家死亡事件
 - `advancement` / `achievement`: 玩家成就事件
 
-## 依赖项目
+## 调试功能
 
-- [QueQiao](https://github.com/17TheWord/QueQiao): Minecraft WebSocket 插件
-- [RCON Client](https://github.com/sirh3e/rcon-client): RCON 协议客户端
+启用调试模式后，适配器会输出详细的连接和消息处理日志：
 
-## 许可证
+```yaml
+debug: true  # 启用调试模式
+```
 
-MIT
+调试模式会显示：
+- WebSocket 连接过程详情
+- 接收到的原始消息数据
+- 消息解析过程
+- 会话创建过程
+- 重连尝试详情
+- 连接错误详情
+
+## 重连机制
+
+适配器内置了智能重连机制：
+
+- **指数退避**: 重连间隔会随着失败次数增加而增加
+- **最大尝试次数**: 避免无限重连，默认最大10次
+- **连接超时**: 10秒连接超时，避免长时间等待
+- **自动重置**: 成功连接后重置重连计数
+
+配置重连参数：
+
+```yaml
+reconnectInterval: 5000      # 初始重连间隔(ms)
+maxReconnectAttempts: 10     # 最大重连次数
+```
