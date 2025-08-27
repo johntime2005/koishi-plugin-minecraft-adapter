@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-minecraft-adapter",
   "description": "Minecraft adapter for Koishi",
-  "version": "0.4.9-next.12",
+  "version": "0.5.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -48,7 +48,7 @@
     },
     "description": {
       "en": "Minecraft adapter for Koishi with RCON and WebSocket support",
-      "zh": "Koishi �?Minecraft 适配器，支持 RCON �?WebSocket"
+      "zh": "Koishi �?Minecraft 适配器，支持 RCON �?WebSocket"
     }
   }
 }

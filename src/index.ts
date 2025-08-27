@@ -150,6 +150,29 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     }
   }
 
+  // 将 message 元素序列化为字符串或简单数组，避免将 Element 实例原样 JSON.stringify 导致丢失内容
+  private serializeOutgoingMessage(message: any) {
+    if (message == null) return message
+    if (typeof message === 'string') return message
+    if (Array.isArray(message)) {
+      return message.map((item) => {
+        if (item == null) return item
+        if (typeof item === 'string') return item
+        if (typeof item === 'object') {
+          // satori Element-like
+          if (item.attrs) return item.attrs.content ?? JSON.stringify(item)
+          return item.content ?? item.text ?? JSON.stringify(item)
+        }
+        return String(item)
+      })
+    }
+    if (typeof message === 'object') {
+      // 支持 satori Element-like 对象以及常见的 text/content 字段
+      return message.content ?? (message.attrs && message.attrs.content) ?? message.text ?? JSON.stringify(message)
+    }
+    return String(message)
+  }
+
   private getWebSocketCloseCode(code: number): string {
     const codes: Record<number, string> = {
       1000: 'Normal Closure',
@@ -493,11 +516,13 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     }
 
     // 优先使用 WebSocket 发送
+    const serialized = this.serializeOutgoingMessage(message)
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
+        const wsMessage = Array.isArray(serialized) ? serialized.join('') : serialized
         const payload = {
           api: 'tell',
-          data: { player, message }
+          data: { player, message: wsMessage }
         }
         if (this.debug) {
           logger.info(`[DEBUG] Sending via WebSocket:`, payload)
@@ -510,7 +535,14 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     // 回退到 RCON
     for (const [botId, rcon] of this.rconConnections) {
       try {
-        const json = JSON.stringify([{ text: message }])
+        // RCON tellraw expects a JSON text component array
+        let components: any[]
+        if (Array.isArray(serialized)) {
+          components = serialized.map((s) => ({ text: String(s) }))
+        } else {
+          components = [{ text: String(serialized) }]
+        }
+        const json = JSON.stringify(components)
         if (this.debug) {
           logger.info(`[DEBUG] Sending via RCON: tellraw ${player} ${json}`)
         }
@@ -530,11 +562,13 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     }
 
     // 优先使用 WebSocket 发送
+    const serialized = this.serializeOutgoingMessage(message)
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
+        const wsMessage = Array.isArray(serialized) ? serialized.join('') : serialized
         const payload = {
           api: 'broadcast',
-          data: { message }
+          data: { message: wsMessage }
         }
         if (this.debug) {
           logger.info(`[DEBUG] Broadcasting via WebSocket:`, payload)
@@ -547,10 +581,12 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     // 回退到 RCON
     for (const [botId, rcon] of this.rconConnections) {
       try {
+        // RCON say expects a plain string
+        const text = Array.isArray(serialized) ? serialized.join('') : String(serialized)
         if (this.debug) {
-          logger.info(`[DEBUG] Broadcasting via RCON: say ${message}`)
+          logger.info(`[DEBUG] Broadcasting via RCON: say ${text}`)
         }
-        await rcon.send(`say ${message}`)
+        await rcon.send(`say ${text}`)
         return
       } catch (error) {
         logger.warn(`Failed to broadcast via RCON for bot ${botId}:`, error)
