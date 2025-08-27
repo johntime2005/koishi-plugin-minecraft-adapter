@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-minecraft-adapter",
-  "description": "Minecraft RCON & webhook integration for Koishi",
-  "version": "0.4.6-next.9",
+  "description": "Minecraft adapter for Koishi",
+  "version": "0.4.7-next.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -36,18 +36,19 @@
     "plugin",
     "minecraft",
     "rcon",
-    "webhook"
+    "websocket",
+    "adapter"
   ],
   "koishi": {
     "preview": true,
     "service": {
       "implements": [
-        "minecraft"
+        "adapter"
       ]
     },
     "description": {
-      "en": "Minecraft RCON & webhook integration for Koishi",
-      "zh": "Minecraft RCON 与 Webhook 集成，提供 minecraft 服务"
+      "en": "Minecraft adapter for Koishi with RCON and WebSocket support",
+      "zh": "Koishi 的 Minecraft 适配器，支持 RCON 和 WebSocket"
     }
   }
 }

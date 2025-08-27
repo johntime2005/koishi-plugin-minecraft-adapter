@@ -1,68 +1,100 @@
 # koishi-plugin-minecraft-adapter
 
-Koishi 的 Minecraft 适配器：支持 RCON、鹊桥(Queqiao) Webhook 与 WebSocket。
+Koishi 的 Minecraft 适配器插件，支持通过 RCON 和 WebSocket 与 Minecraft 服务器交互。
 
-- RCON：连接并发送命令/广播
-- Webhook/WS：接收聊天、加入、离开等事件并在 Koishi 中触发
+## 功能特性
 
-参考实现：
-- https://github.com/17TheWord/nonebot-adapter-minecraft
-- https://github.com/KroMiose/nekro-agent/tree/main/nekro_agent/adapters/minecraft
+- **RCON 连接**: 连接 Minecraft 服务器的 RCON 接口，执行命令和广播消息
+- **WebSocket 连接**: 通过鹊桥(QueQiao) WebSocket 接收服务器事件
+- **事件支持**: 聊天消息、玩家加入/离开、死亡事件、成就事件等
+- **自动重连**: WebSocket 断开后自动重连机制
+- **多机器人支持**: 支持配置多个 Minecraft 服务器实例
 
 ## 安装
 
 ```bash
-npm i koishi-plugin-minecraft-adapter
+npm install koishi-plugin-minecraft-adapter
 ```
 
 ## 配置
 
-- RCON：host/port/password/timeout/reconnectInterval/reconnectStrategy/maxReconnectInterval/broadcastMode
-- Webhook：enabled/path/secret/verifyMode/signatureHeader/secretHeader
-- WebSocket（对齐鹊桥官方）
-  - enabled: 是否启用
-  - url: WS 地址，例如 `ws://127.0.0.1:8080`
-  - serverName: 必填，需与鹊桥 `config.yml` 的 `server_name` 完全一致
-  - accessToken: 可选，对应鹊桥 `config.yml` 的 `access_token`
-  - extraHeaders: 可选，附加自定义请求头
-  - reconnectStrategy: `fixed | exponential`
-  - reconnectInterval / maxReconnectInterval: 断线重连间隔
+适配器支持以下配置选项：
 
-握手头部：
+### 基本配置
+- `serverName`: 服务器名称，用于标识不同的 Minecraft 服务器
+- `platform`: 平台标识符，默认为 'minecraft'
 
-```
-x-self-name: <serverName>
-Authorization: Bearer <accessToken>   // 若 accessToken 不为空
+### RCON 配置
+```yaml
+rcon:
+  enabled: true
+  host: '127.0.0.1'
+  port: 25575
+  password: 'your_rcon_password'
+  timeout: 5000
 ```
 
-鹊桥项目参考：
+### WebSocket 配置
+```yaml
+websocket:
+  enabled: true
+  url: 'ws://127.0.0.1:8080'
+  serverName: 'MyMinecraftServer'  # 必须与鹊桥配置一致
+  accessToken: 'your_access_token'  # 可选
+  extraHeaders: {}  # 可选的额外请求头
+```
 
-- QueQiao: https://github.com/17TheWord/QueQiao
+## 使用方法
 
-## 用法
+### 在 Koishi 中使用
 
-```ts
+```typescript
+// 执行 RCON 命令
 await ctx.minecraft.execute('list')
+
+// 广播消息
 await ctx.minecraft.broadcast('服务器即将重启')
+
+// 向指定玩家发送消息
 await ctx.minecraft.sendTo('Steve', '你好')
 
-ctx.on('minecraft/chat', (p) => {
-  // p: { player, message, raw }
+// 监听聊天事件
+ctx.on('message', (session) => {
+  if (session.platform === 'minecraft') {
+    console.log(`玩家 ${session.author.username}: ${session.content}`)
+  }
+})
+
+// 监听玩家加入事件
+ctx.on('guild-member-added', (session) => {
+  if (session.platform === 'minecraft') {
+    console.log(`玩家 ${session.author.username} 加入了服务器`)
+  }
+})
+
+// 监听玩家离开事件
+ctx.on('guild-member-removed', (session) => {
+  if (session.platform === 'minecraft') {
+    console.log(`玩家 ${session.author.username} 离开了服务器`)
+  }
 })
 ```
 
-### ChatLuna（AI）联动
+### 事件类型
 
-启用后可直接在 Koishi 中使用以下命令，便于 ChatLuna 的“指令模型/函数调用/意图解析”触发：
+适配器支持以下 Minecraft 事件：
 
-- `mc.exec <command>`：通过 RCON 执行任意指令
-- `mc.say <message>`：向全服广播（优先走 WS，失败回退 RCON）
-- `mc.tell <player> <message>`：向指定玩家发送消息（优先 WS，失败回退 RCON）
-- `mc.title <player> <title> [subtitle]`：标题/子标题（WS 或 RCON 回退）
-- `mc.actionbar <player> <message>`：动作栏（WS 或 RCON 回退）
+- `chat` / `player_chat`: 玩家聊天消息
+- `join` / `player_join`: 玩家加入服务器
+- `leave` / `quit` / `player_quit`: 玩家离开服务器
+- `death` / `player_death`: 玩家死亡事件
+- `advancement` / `achievement`: 玩家成就事件
 
-可在插件配置中调整：
-- `commands.enabled`：是否注册上述命令（默认开启）
-- `commands.authority`：执行所需权限（默认 2），避免普通用户误触发
+## 依赖项目
+
+- [QueQiao](https://github.com/17TheWord/QueQiao): Minecraft WebSocket 插件
+- [RCON Client](https://github.com/sirh3e/rcon-client): RCON 协议客户端
+
+## 许可证
 
 MIT
