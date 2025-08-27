@@ -1,4 +1,5 @@
 import { Adapter, Bot, Context, Logger, Schema, Session } from 'koishi'
+import Element from '@satorijs/element'
 import { Rcon } from 'rcon-client'
 import WebSocket from 'ws'
 
@@ -248,22 +249,65 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
         }
 
         const obj = JSON.parse(text)
-        const type = obj.type || obj.event || 'unknown'
-        const payload = obj.data ?? obj
+        const postType = obj.post_type
+        const subType = obj.sub_type
+        const eventName = obj.event_name
+        const payload = obj
+
+        // 确定消息类型
+        let type = 'unknown'
+        if (postType === 'message') {
+          if (subType === 'chat' || eventName === 'AsyncPlayerChatEvent') {
+            type = 'chat'
+          }
+        } else if (postType === 'notice') {
+          if (subType === 'join' || eventName === 'PlayerJoinEvent') {
+            type = 'join'
+          } else if (subType === 'leave' || eventName === 'PlayerQuitEvent') {
+            type = 'leave'
+          }
+        }
 
         if (this.debug) {
-          logger.info(`[DEBUG] Parsed message type: ${type}, payload:`, payload)
+          logger.info(`[DEBUG] Parsed message type: ${type}, post_type: ${postType}, sub_type: ${subType}, event_name: ${eventName}, payload:`, payload)
         }
 
         const session = this.createSession(bot, type, payload)
         if (session) {
           if (this.debug) {
             logger.info(`[DEBUG] Created session:`, session)
-            logger.info(`[DEBUG] Dispatching session to bot ${bot.selfId}`)
+            logger.info(`[DEBUG] Preparing to dispatch session to bot ${bot.selfId}`)
+
+            // 进一步追踪 session 内的重要字段，避免直接序列化整个对象导致循环引用问题
+            try {
+              const content = session.content
+              const cid = (session as any).cid || (session as any).channelId || null
+              const gid = (session as any).gid || (session as any).guildId || null
+              const uid = (session as any).uid || (session as any).userId || null
+              const ev = (session as any).event || {}
+              const msg = ev.message || (ev._data && ev._data.message) || null
+              logger.info(`[TRACE] session.content:`, content)
+              logger.info(`[TRACE] session.ids:`, { cid, gid, uid })
+              logger.info(`[TRACE] event.type/message:`, { type: ev.type || ev._type || null, messageContent: msg?.content || msg?.text || null })
+            } catch (err) {
+              logger.warn(`[TRACE] Failed to extract session fields:`, err)
+            }
           }
-          bot.dispatch(session)
+
+          try {
+            bot.dispatch(session)
+            if (this.debug) logger.info(`[DEBUG] Session dispatched successfully to bot ${bot.selfId}`)
+          } catch (err) {
+            // 记录 dispatch 中上游插件抛出的错误以便定位
+            logger.warn(`Dispatch threw an error for bot ${bot.selfId}:`, err)
+            if (this.debug) {
+              logger.info(`[DEBUG] Dispatch error stack:`, err?.stack || err)
+              // 继续，不抛出，避免影响 WebSocket 消息处理循环
+            }
+          }
+
           if (this.debug) {
-            logger.info(`[DEBUG] Session dispatched successfully`)
+            logger.info(`[DEBUG] Post-dispatch: you can now check Koishi logs for further processing of this session`)
           }
         } else {
           if (this.debug) {
@@ -336,92 +380,105 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       logger.info(`[DEBUG] Creating session for event type: ${type}, payload:`, payload)
     }
 
+    // 创建 Event 对象
+    const event: any = {
+      sn: Date.now(), // 简单的时间戳作为序列号
+      type: type === 'chat' ? 'message' : type === 'join' ? 'guild-member-added' : type === 'leave' ? 'guild-member-removed' : type,
+      login: {
+        sn: bot.sn,
+        adapter: 'minecraft-adapter',
+        user: bot.user || { id: bot.selfId, name: bot.selfId }, // 确保 user 对象完整
+        platform: 'minecraft',
+        selfId: bot.selfId,
+        status: bot.status,
+        features: bot.features,
+      },
+      selfId: bot.selfId,
+      platform: 'minecraft',
+      timestamp: (payload.timestamp || Date.now()) * 1000,
+      referrer: payload,
+    }
+
+    // 根据事件类型设置相应的属性
     switch (type) {
       case 'chat':
-      case 'player_chat':
-        return {
-          type: 'message',
-          subtype: 'private',
-          platform: 'minecraft',
-          selfId: bot.selfId,
-          userId: payload.player || payload.name || 'unknown',
-          channelId: `mc:${payload.player || payload.name || 'unknown'}`,
-          guildId: 'minecraft',
-          content: payload.message || payload.text || '',
-          timestamp: Date.now(),
-          author: {
-            userId: payload.player || payload.name || 'unknown',
-            username: payload.player || payload.name || 'unknown',
-          },
-        } as Session
+        const player = payload.player
+        const userId = player?.uuid || player?.display_name || 'unknown'
+        const username = player?.display_name || player?.nickname || userId
+
+        event.user = {
+          id: userId,
+          name: username,
+          nick: player?.nickname,
+        }
+        event.channel = {
+          id: payload.server_name || 'minecraft',
+          type: 0, // TEXT
+        }
+        event.guild = {
+          id: payload.server_name || 'minecraft',
+          name: payload.server_name || 'Minecraft Server',
+        }
+        event.message = {
+          id: payload.message_id || Date.now().toString(),
+          content: payload.message || '',
+          timestamp: (payload.timestamp || Date.now()) * 1000,
+          user: event.user, // 现在 event.user 已经定义了
+          elements: payload.message ? [Element('text', { content: payload.message })] : [],
+          createdAt: (payload.timestamp || Date.now()) * 1000,
+          updatedAt: (payload.timestamp || Date.now()) * 1000,
+        }
+        break
 
       case 'join':
-      case 'player_join':
-        return {
-          type: 'guild-member-added',
-          platform: 'minecraft',
-          selfId: bot.selfId,
-          userId: payload.player || payload.name || 'unknown',
-          guildId: 'minecraft',
-          timestamp: Date.now(),
-        } as Session
+        const joinPlayer = payload.player
+        const joinUserId = joinPlayer?.uuid || joinPlayer?.display_name || 'unknown'
+
+        event.user = {
+          id: joinUserId,
+          name: joinPlayer?.display_name || joinPlayer?.nickname || joinUserId,
+          nick: joinPlayer?.nickname,
+        }
+        event.guild = {
+          id: payload.server_name || 'minecraft',
+          name: payload.server_name || 'Minecraft Server',
+        }
+        event.member = {
+          user: event.user,
+          nick: joinPlayer?.nickname,
+          joinedAt: (payload.timestamp || Date.now()) * 1000,
+        }
+        break
 
       case 'leave':
-      case 'quit':
-      case 'player_quit':
-        return {
-          type: 'guild-member-removed',
-          platform: 'minecraft',
-          selfId: bot.selfId,
-          userId: payload.player || payload.name || 'unknown',
-          guildId: 'minecraft',
-          timestamp: Date.now(),
-        } as Session
+        const leavePlayer = payload.player
+        const leaveUserId = leavePlayer?.uuid || leavePlayer?.display_name || 'unknown'
 
-      case 'death':
-      case 'player_death':
-        return {
-          type: 'message',
-          subtype: 'private',
-          platform: 'minecraft',
-          selfId: bot.selfId,
-          userId: payload.player || payload.name || 'unknown',
-          channelId: 'minecraft',
-          guildId: 'minecraft',
-          content: `💀 ${payload.player || payload.name || 'unknown'} ${payload.deathMessage || 'died'}`,
-          timestamp: Date.now(),
-          author: {
-            userId: payload.player || payload.name || 'unknown',
-            username: payload.player || payload.name || 'unknown',
-          },
-        } as Session
-
-      case 'advancement':
-      case 'achievement':
-        return {
-          type: 'message',
-          subtype: 'private',
-          platform: 'minecraft',
-          selfId: bot.selfId,
-          userId: payload.player || payload.name || 'unknown',
-          channelId: 'minecraft',
-          guildId: 'minecraft',
-          content: `🏆 ${payload.player || payload.name || 'unknown'} achieved: ${payload.advancement || payload.achievement}`,
-          timestamp: Date.now(),
-          author: {
-            userId: payload.player || payload.name || 'unknown',
-            username: payload.player || payload.name || 'unknown',
-          },
-        } as Session
+        event.user = {
+          id: leaveUserId,
+          name: leavePlayer?.display_name || leavePlayer?.nickname || leaveUserId,
+          nick: leavePlayer?.nickname,
+        }
+        event.guild = {
+          id: payload.server_name || 'minecraft',
+          name: payload.server_name || 'Minecraft Server',
+        }
+        event.member = {
+          user: event.user,
+          nick: leavePlayer?.nickname,
+        }
+        break
 
       default:
-        // 自定义事件可以通过其他方式处理
         if (this.debug) {
           logger.info(`[DEBUG] Unhandled event type: ${type}, payload:`, payload)
         }
         logger.debug(`Unhandled event type: ${type}`, payload)
         return undefined
     }
+
+    // 使用 bot.session() 方法创建 Session 对象
+    return bot.session(event)
   }
 
   async sendPrivateMessage(player: string, message: string): Promise<void> {
