@@ -27,6 +27,8 @@ export declare class MinecraftBot<C extends Context = Context> extends Bot<C, Mi
 export interface MinecraftAdapterConfig {
     bots: MinecraftBotConfig[];
     debug?: boolean;
+    detailedLogging?: boolean;
+    tokenizeMode?: 'split' | 'none';
     reconnectInterval?: number;
     maxReconnectAttempts?: number;
 }
@@ -35,6 +37,8 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private wsConnections;
     private reconnectAttempts;
     private debug;
+    private detailedLogging;
+    private tokenizeMode;
     private reconnectInterval;
     private maxReconnectAttempts;
     constructor(ctx: C, config: MinecraftAdapterConfig);

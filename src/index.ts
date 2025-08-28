@@ -59,6 +59,8 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftB
 export interface MinecraftAdapterConfig {
   bots: MinecraftBotConfig[]
   debug?: boolean
+  detailedLogging?: boolean
+  tokenizeMode?: 'split' | 'none'
   reconnectInterval?: number
   maxReconnectAttempts?: number
 }
@@ -68,13 +70,17 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   private wsConnections = new Map<string, WebSocket>()
   private reconnectAttempts = new Map<string, number>()
   private debug: boolean
+  private detailedLogging: boolean
+  private tokenizeMode: 'split' | 'none'
   private reconnectInterval: number
   private maxReconnectAttempts: number
 
   constructor(ctx: C, config: MinecraftAdapterConfig) {
     super(ctx)
     try {
-      this.debug = config.debug ?? false
+  this.debug = config.debug ?? false
+  this.detailedLogging = (config as any).detailedLogging ?? false
+  this.tokenizeMode = (config as any).tokenizeMode ?? 'split'
       this.reconnectInterval = config.reconnectInterval ?? 5000
       this.maxReconnectAttempts = config.maxReconnectAttempts ?? 10
 
@@ -223,26 +229,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     this.wsConnections.set(bot.selfId, ws)
     bot.ws = ws
 
-    // 添加连接状态监控
-    const connectionMonitor = setInterval(() => {
-      if (this.debug) {
-        logger.info(`[DEBUG] WebSocket state for bot ${bot.selfId}: ${ws.readyState} (${this.getWebSocketStateString(ws.readyState)})`)
-      }
-    }, 10000) // 每10秒检查一次状态
-
-    // 添加心跳检测
-    let heartbeatInterval: NodeJS.Timeout | null = null
-    const startHeartbeat = () => {
-      if (heartbeatInterval) clearInterval(heartbeatInterval)
-      heartbeatInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          if (this.debug) {
-            logger.info(`[DEBUG] Sending heartbeat ping for bot ${bot.selfId}`)
-          }
-          ws.ping()
-        }
-      }, 30000) // 每30秒发送一次心跳
-    }
+  // (已移除心跳发送与连接状态轮询以减少周期性日志与 ping)
 
     // 添加连接超时处理
     const connectionTimeout = setTimeout(() => {
@@ -265,7 +252,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       this.reconnectAttempts.set(bot.selfId, 0)
       bot.online()
       clearTimeout(connectionTimeout)
-      startHeartbeat()
+  // 心跳发送已移除
     })
 
     ws.on('message', (data: WebSocket.RawData) => {
@@ -303,22 +290,43 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
         const session = this.createSession(bot, type, payload)
         if (session) {
           if (this.debug) {
-            logger.info(`[DEBUG] Created session:`, session)
-            logger.info(`[DEBUG] Preparing to dispatch session to bot ${bot.selfId}`)
+              logger.info(`[DEBUG] Created session:`, session)
+              logger.info(`[DEBUG] Preparing to dispatch session to bot ${bot.selfId}`)
 
-            // 进一步追踪 session 内的重要字段，避免直接序列化整个对象导致循环引用问题
+              // 进一步追踪 session 内的重要字段，避免直接序列化整个对象导致循环引用问题
+              try {
+                const content = session.content
+                const cid = (session as any).cid || (session as any).channelId || null
+                const gid = (session as any).gid || (session as any).guildId || null
+                const uid = (session as any).uid || (session as any).userId || null
+                const ev = (session as any).event || {}
+                const msg = ev.message || (ev._data && ev._data.message) || null
+                logger.info(`[TRACE] session.content:`, content)
+                logger.info(`[TRACE] session.ids:`, { cid, gid, uid })
+                logger.info(`[TRACE] event.type/message:`, { type: ev.type || ev._type || null, messageContent: msg?.content || msg?.text || null })
+              } catch (err) {
+                logger.warn(`[TRACE] Failed to extract session fields:`, err)
+              }
+          }
+
+          // 在 dispatch 之前记录完整 session 快照（当 detailedLogging 启用时）
+          if (this.detailedLogging) {
             try {
-              const content = session.content
-              const cid = (session as any).cid || (session as any).channelId || null
-              const gid = (session as any).gid || (session as any).guildId || null
-              const uid = (session as any).uid || (session as any).userId || null
-              const ev = (session as any).event || {}
-              const msg = ev.message || (ev._data && ev._data.message) || null
-              logger.info(`[TRACE] session.content:`, content)
-              logger.info(`[TRACE] session.ids:`, { cid, gid, uid })
-              logger.info(`[TRACE] event.type/message:`, { type: ev.type || ev._type || null, messageContent: msg?.content || msg?.text || null })
-            } catch (err) {
-              logger.warn(`[TRACE] Failed to extract session fields:`, err)
+              const snapshot = {
+                sessionId: (session as any).id,
+                content: session.content,
+                elements: session.event?.message?.elements,
+                eventMessage: session.event?.message,
+                eventReferrer: session.event?.referrer,
+                user: session.event?.user,
+                userId: (session as any).userId || session.event?.user?.id,
+                guildId: (session as any).guildId || session.event?.guild?.id,
+                channelId: (session as any).channelId || session.event?.channel?.id,
+                isDirect: (session as any).isDirect,
+              }
+              logger.info(`[DETAILED] Pre-dispatch session snapshot for bot ${bot.selfId}:`, snapshot)
+            } catch (e) {
+              logger.warn(`[DETAILED] Failed to capture pre-dispatch session snapshot:`, e)
             }
           }
 
@@ -328,6 +336,22 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
           } catch (err) {
             // 记录 dispatch 中上游插件抛出的错误以便定位
             logger.warn(`Dispatch threw an error for bot ${bot.selfId}:`, err)
+            if (this.detailedLogging) {
+              try {
+                const snapshot = {
+                  sessionId: (session as any).id,
+                  content: session.content,
+                  elements: session.event?.message?.elements,
+                  eventMessage: session.event?.message,
+                  eventReferrer: session.event?.referrer,
+                  userId: (session as any).userId || session.event?.user?.id,
+                  guildId: (session as any).guildId || session.event?.guild?.id,
+                }
+                logger.info(`[DETAILED] Dispatch error session snapshot for bot ${bot.selfId}:`, snapshot)
+              } catch (e) {
+                logger.warn(`[DETAILED] Failed to capture session snapshot:`, e)
+              }
+            }
             if (this.debug) {
               logger.info(`[DEBUG] Dispatch error stack:`, err?.stack || err)
               // 继续，不抛出，避免影响 WebSocket 消息处理循环
@@ -359,12 +383,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       }
       bot.offline()
 
-      // 清理心跳和监控
-      if (heartbeatInterval) {
-        clearInterval(heartbeatInterval)
-        heartbeatInterval = null
-      }
-      clearInterval(connectionMonitor)
+  // 清理连接相关资源
 
       const attempts = this.reconnectAttempts.get(bot.selfId) || 0
       if (attempts < this.maxReconnectAttempts) {
@@ -391,15 +410,11 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     })
 
     ws.on('ping', () => {
-      if (this.debug) {
-        logger.info(`[DEBUG] Received ping from server for bot ${bot.selfId}`)
-      }
+  // ping handling removed
     })
 
     ws.on('pong', () => {
-      if (this.debug) {
-        logger.info(`[DEBUG] Received pong from server for bot ${bot.selfId}`)
-      }
+  // pong handling removed
     })
   }
 
@@ -448,12 +463,55 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
           name: payload.server_name || 'Minecraft Server',
         }
         // 将元素设为字符串数组（简洁、可靠）：Session.content getter 会对 elements.join("") 返回文本
+  // 规范化消息文本并将其分词为 elements，提升 Koishi 命令解析的准确性
+        let messageText: string = ''
+        if (payload == null) {
+          messageText = ''
+        } else if (typeof payload.message === 'string') {
+          messageText = payload.message
+        } else if (Array.isArray(payload.message)) {
+          // 如果 payload.message 已经是数组，尝试把每项转换为字符串并连接为文本
+          messageText = payload.message.map((it: any) => (typeof it === 'string' ? it : it?.content ?? it?.text ?? JSON.stringify(it))).join(' ')
+        } else if (typeof payload.message === 'object') {
+          // 支持常见 component 对象
+          messageText = payload.message.attrs?.content ?? payload.message.content ?? payload.message.text ?? JSON.stringify(payload.message)
+        } else {
+          messageText = String(payload.message ?? '')
+        }
+
+  // 先按照配置得到字符串 tokens，然后将它们转换为 Koishi 兼容的元素对象
+  let elements = (() => {
+          if (!messageText) return []
+          const tokens: string[] =
+            this.tokenizeMode === 'none'
+              ? [messageText]
+              : messageText.split(/(\s+)/).filter((s: string) => s.length > 0)
+
+          // 将每个 token 包装为 Koishi h 元素对象，确保 ChatLuna 的 messageTransformer/intercept 能读取到 element.type 和 element.attrs.content
+          // 同时为每个元素添加 toString 方法，保证 elements.join('') 会返回原始文本（用于 session.content 与命令解析）
+          return tokens.map((token) => {
+            const el: any = { type: 'text', attrs: { content: token } }
+            el.toString = function () {
+              return this.attrs?.content ?? ''
+            }
+            return el
+          })
+        })()
+
+  // （已移除 wakeWords 相关处理，适配器保持最小侵入性，由上游中间件负责唤醒逻辑）
+
+        if (this.detailedLogging) {
+          logger.info(`[DEBUG] Message parse details for bot ${bot.selfId}: rawPayloadMessage=`, payload.message)
+          logger.info(`[DEBUG] Message parse details for bot ${bot.selfId}: messageText=`, messageText)
+          logger.info(`[DEBUG] Message parse details for bot ${bot.selfId}: elements=`, elements)
+        }
+
         event.message = {
           id: payload.message_id || Date.now().toString(),
-          content: payload.message || '',
+          content: messageText,
           timestamp: (payload.timestamp || Date.now()) * 1000,
           user: event.user, // 现在 event.user 已经定义了
-          elements: payload.message ? [payload.message] : [],
+          elements,
           createdAt: (payload.timestamp || Date.now()) * 1000,
           updatedAt: (payload.timestamp || Date.now()) * 1000,
         }
@@ -507,6 +565,26 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     }
 
     // 使用 bot.session() 方法创建 Session 对象
+    // 添加兼容性的 room/context 字段，便于 downstream 中间件（例如 chatluna）识别房间或上下文
+    try {
+      const channelId = event.channel?.id || event.guild?.id || 'minecraft'
+      const roomId = `${event.platform}:${channelId}`
+      ;(event as any).room = { id: roomId }
+      ;(event as any).context = (event as any).context || {}
+      ;(event as any).context.options = Object.assign({}, (event as any).context.options || {}, { room: roomId })
+      // 也在 channel 上放一个兼容别名，便于某些插件直接读取
+      if (event.channel) (event.channel as any).altId = roomId
+      if (this.detailedLogging) {
+        try {
+          logger.info(`[DETAILED] Added compatibility room/context for bot ${bot.selfId}:`, { roomId })
+        } catch (e) {
+          // ignore
+        }
+      }
+    } catch (e) {
+      if (this.debug) logger.warn('[DEBUG] Failed to add compatibility room/context:', e)
+    }
+
     return bot.session(event)
   }
 
@@ -641,6 +719,8 @@ export namespace MinecraftAdapter {
         extraHeaders: Schema.dict(Schema.string()).description('额外请求头'),
       }).description('WebSocket 配置'),
     })).description('机器人配置列表').default([]),
+  detailedLogging: Schema.boolean().description('启用详细调试日志（记录入站解析和 dispatch 快照）').default(false),
+  tokenizeMode: Schema.union([Schema.const('split'), Schema.const('none')]).description('入站消息的分词模式：split=按空白分词（默认），none=不分词，保留原文').default('split'),
   })
 }
 
