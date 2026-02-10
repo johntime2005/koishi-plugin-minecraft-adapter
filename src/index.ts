@@ -4,6 +4,179 @@ import WebSocket from 'ws'
 
 const logger = new Logger('minecraft')
 
+// ============================================================================
+// 鹊桥 V2 协议类型定义
+// 参考文档: https://queqiao-docs.pages.dev
+// ============================================================================
+
+/**
+ * Minecraft 文本组件格式
+ * 参考: https://zh.minecraft.wiki/w/原始JSON文本格式
+ */
+export interface MinecraftTextComponent {
+  text?: string
+  color?: string
+  bold?: boolean
+  italic?: boolean
+  underlined?: boolean
+  strikethrough?: boolean
+  obfuscated?: boolean
+  extra?: MinecraftTextComponent[]
+}
+
+/**
+ * 鹊桥 V2 Player 对象
+ * 注意：不同服务端实现可能缺少部分字段
+ */
+export interface QueqiaoPlayer {
+  nickname: string
+  uuid?: string
+  is_op?: boolean
+  address?: string
+  health?: number
+  max_health?: number
+  experience_level?: number
+  experience_progress?: number
+  total_experience?: number
+  walk_speed?: number
+  x?: number
+  y?: number
+  z?: number
+}
+
+/**
+ * 鹊桥 V2 Death 对象
+ */
+export interface QueqiaoDeath {
+  key?: string
+  args?: string
+  text?: string
+}
+
+/**
+ * 鹊桥 V2 Achievement 对象
+ */
+export interface QueqiaoAchievement {
+  display?: {
+    title?: string
+    description?: string
+    frame?: string
+  }
+  text?: string
+}
+
+/**
+ * 鹊桥 V2 事件基础结构
+ */
+export interface QueqiaoEventBase {
+  timestamp: number
+  post_type: 'message' | 'notice' | 'response'
+  event_name: string
+  server_name: string
+  server_version?: string
+  server_type?: string
+}
+
+/**
+ * 玩家聊天事件 (PlayerChatEvent)
+ */
+export interface PlayerChatEvent extends QueqiaoEventBase {
+  post_type: 'message'
+  event_name: 'PlayerChatEvent'
+  message: string
+  rawMessage?: string
+  message_id?: string
+  player: QueqiaoPlayer
+}
+
+/**
+ * 玩家命令事件 (PlayerCommandEvent)
+ */
+export interface PlayerCommandEvent extends QueqiaoEventBase {
+  post_type: 'message'
+  event_name: 'PlayerCommandEvent'
+  command: string
+  rawMessage?: string
+  message_id?: string
+  player: QueqiaoPlayer
+}
+
+/**
+ * 玩家加入事件 (PlayerJoinEvent)
+ */
+export interface PlayerJoinEvent extends QueqiaoEventBase {
+  post_type: 'notice'
+  event_name: 'PlayerJoinEvent'
+  sub_type: 'player_join'
+  player: QueqiaoPlayer
+}
+
+/**
+ * 玩家离开事件 (PlayerQuitEvent)
+ */
+export interface PlayerQuitEvent extends QueqiaoEventBase {
+  post_type: 'notice'
+  event_name: 'PlayerQuitEvent'
+  sub_type: 'player_quit'
+  player: QueqiaoPlayer
+}
+
+/**
+ * 玩家死亡事件 (PlayerDeathEvent)
+ */
+export interface PlayerDeathEvent extends QueqiaoEventBase {
+  post_type: 'notice'
+  event_name: 'PlayerDeathEvent'
+  sub_type: 'player_death'
+  death?: QueqiaoDeath
+  player: QueqiaoPlayer
+}
+
+/**
+ * 玩家成就事件 (PlayerAchievementEvent)
+ */
+export interface PlayerAchievementEvent extends QueqiaoEventBase {
+  post_type: 'notice'
+  event_name: 'PlayerAchievementEvent'
+  sub_type: 'player_achievement'
+  achievement?: QueqiaoAchievement
+  player: QueqiaoPlayer
+}
+
+export type QueqiaoEvent =
+  | PlayerChatEvent
+  | PlayerCommandEvent
+  | PlayerJoinEvent
+  | PlayerQuitEvent
+  | PlayerDeathEvent
+  | PlayerAchievementEvent
+
+/**
+ * 鹊桥 V2 API 请求格式
+ */
+export interface QueqiaoApiRequest<T = any> {
+  api: string
+  data: T
+  echo?: string | number
+}
+
+/**
+ * 鹊桥 V2 API 响应格式
+ */
+export interface QueqiaoApiResponse<T = any> {
+  code: number
+  api: string
+  post_type: 'response'
+  status: 'SUCCESS' | 'FAILED'
+  message: string
+  data?: T
+  echo?: string | number
+}
+
+// ============================================================================
+// Koishi Bot 配置与实现
+// ============================================================================
+
 export interface MinecraftBotConfig {
   selfId: string
   serverName?: string
@@ -27,11 +200,15 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftB
   constructor(ctx: C, config: MinecraftBotConfig) {
     super(ctx, config, 'minecraft')
     this.selfId = config.selfId
+    this.platform = 'minecraft'
   }
 
-  async sendMessage(channelId: string, content: string) {
-    if (channelId.startsWith('mc:')) {
-      const player = channelId.slice(3)
+  /**
+   * 发送消息到频道或私聊
+   */
+  async sendMessage(channelId: string, content: string): Promise<string[]> {
+    if (channelId.startsWith('private:')) {
+      const player = channelId.slice(8)
       return await this.sendPrivateMessage(player, content)
     } else {
       if (this.adapter instanceof MinecraftAdapter) {
@@ -42,6 +219,9 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftB
     }
   }
 
+  /**
+   * 发送私聊消息
+   */
   async sendPrivateMessage(userId: string, content: string): Promise<string[]> {
     if (this.adapter instanceof MinecraftAdapter) {
       await this.adapter.sendPrivateMessage(userId, content)
@@ -50,11 +230,22 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftB
     return []
   }
 
+  /**
+   * 执行 RCON 命令
+   * 优先使用 WebSocket send_rcon_command 接口，回退到直接 RCON 连接
+   */
   async executeCommand(command: string): Promise<string> {
+    if (this.adapter instanceof MinecraftAdapter) {
+      return await this.adapter.executeRconCommand(command)
+    }
     if (!this.rcon) throw new Error('RCON not connected')
     return await this.rcon.send(command)
   }
 }
+
+// ============================================================================
+// Koishi Adapter 配置与实现
+// ============================================================================
 
 export interface MinecraftAdapterConfig {
   bots: MinecraftBotConfig[]
@@ -63,26 +254,35 @@ export interface MinecraftAdapterConfig {
   tokenizeMode?: 'split' | 'none'
   reconnectInterval?: number
   maxReconnectAttempts?: number
+  /** 是否在消息前添加默认前缀 [鹊桥]，默认不添加（由服务端配置） */
+  useMessagePrefix?: boolean
 }
 
 export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
+  static reusable = true
+
   private rconConnections = new Map<string, Rcon>()
   private wsConnections = new Map<string, WebSocket>()
   private reconnectAttempts = new Map<string, number>()
+  private pendingRequests = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: NodeJS.Timeout }>()
+  private requestCounter = 0
+
   private debug: boolean
   private detailedLogging: boolean
   private tokenizeMode: 'split' | 'none'
   private reconnectInterval: number
   private maxReconnectAttempts: number
+  private useMessagePrefix: boolean
 
   constructor(ctx: C, config: MinecraftAdapterConfig) {
     super(ctx)
     try {
-  this.debug = config.debug ?? false
-  this.detailedLogging = (config as any).detailedLogging ?? false
-  this.tokenizeMode = (config as any).tokenizeMode ?? 'split'
+      this.debug = config.debug ?? false
+      this.detailedLogging = config.detailedLogging ?? false
+      this.tokenizeMode = config.tokenizeMode ?? 'split'
       this.reconnectInterval = config.reconnectInterval ?? 5000
       this.maxReconnectAttempts = config.maxReconnectAttempts ?? 10
+      this.useMessagePrefix = config.useMessagePrefix ?? false
 
       if (this.debug) {
         logger.info(`[DEBUG] MinecraftAdapter initialized with config:`, {
@@ -93,85 +293,93 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
         })
       }
 
-    // 为每个配置创建机器人
-  ctx.on('ready', async () => {
-      if (this.debug) {
-        logger.info(`[DEBUG] Koishi ready event triggered, initializing ${config.bots.length} bots`)
-      }
-
-  for (const botConfig of config.bots) {
+      // 为每个配置创建机器人
+      ctx.on('ready', async () => {
         if (this.debug) {
-          logger.info(`[DEBUG] Initializing bot ${botConfig.selfId}`)
+          logger.info(`[DEBUG] Koishi ready event triggered, initializing ${config.bots.length} bots`)
         }
 
-  const bot = new MinecraftBot(ctx, botConfig)
-        bot.adapter = this
-        this.bots.push(bot)
+        for (const botConfig of config.bots) {
+          if (this.debug) {
+            logger.info(`[DEBUG] Initializing bot ${botConfig.selfId}`)
+          }
 
-        // 初始化 RCON 连接
-        if (botConfig.rcon) {
-          try {
-            if (this.debug) {
-              logger.info(`[DEBUG] Connecting RCON for bot ${botConfig.selfId} to ${botConfig.rcon.host}:${botConfig.rcon.port}`)
+          const bot = new MinecraftBot(ctx, botConfig)
+          bot.adapter = this
+          this.bots.push(bot)
+
+          // 初始化 RCON 连接
+          if (botConfig.rcon && botConfig.rcon.host && botConfig.rcon.port && botConfig.rcon.password) {
+            try {
+              if (this.debug) {
+                logger.info(`[DEBUG] Connecting RCON for bot ${botConfig.selfId} to ${botConfig.rcon.host}:${botConfig.rcon.port}`)
+              }
+
+              const rcon = await Rcon.connect({
+                host: botConfig.rcon.host,
+                port: botConfig.rcon.port,
+                password: botConfig.rcon.password,
+                timeout: botConfig.rcon.timeout || 5000,
+              })
+              this.rconConnections.set(botConfig.selfId, rcon)
+              bot.rcon = rcon
+              logger.info(`RCON connected for bot ${botConfig.selfId}`)
+            } catch (error) {
+              logger.warn(`Failed to connect RCON for bot ${botConfig.selfId}:`, error)
+              if (this.debug) {
+                logger.info(`[DEBUG] RCON connection error details:`, (error as Error).message, (error as Error).stack)
+              }
             }
-
-            const rcon = await Rcon.connect({
-              host: botConfig.rcon.host,
-              port: botConfig.rcon.port,
-              password: botConfig.rcon.password,
-              timeout: botConfig.rcon.timeout || 5000,
-            })
-            this.rconConnections.set(botConfig.selfId, rcon)
-            bot.rcon = rcon
-            logger.info(`RCON connected for bot ${botConfig.selfId}`)
-          } catch (error) {
-            logger.warn(`Failed to connect RCON for bot ${botConfig.selfId}:`, error)
+          } else {
             if (this.debug) {
-              logger.info(`[DEBUG] RCON connection error details:`, error.message, error.stack)
+              if (botConfig.rcon) {
+                logger.info(`[DEBUG] RCON config incomplete for bot ${botConfig.selfId}, skipping (need host, port, password)`)
+              } else {
+                logger.info(`[DEBUG] No RCON config for bot ${botConfig.selfId}`)
+              }
             }
           }
-        } else {
-          if (this.debug) {
-            logger.info(`[DEBUG] No RCON config for bot ${botConfig.selfId}`)
-          }
-        }
 
-        // 初始化 WebSocket 连接
-        if (botConfig.websocket) {
-          if (this.debug) {
-            logger.info(`[DEBUG] Initializing WebSocket for bot ${botConfig.selfId}`)
-          }
-          await this.connectWebSocket(bot, botConfig.websocket)
-        } else {
-          if (this.debug) {
-            logger.info(`[DEBUG] No WebSocket config for bot ${botConfig.selfId}`)
+          // 初始化 WebSocket 连接
+          if (botConfig.websocket) {
+            if (this.debug) {
+              logger.info(`[DEBUG] Initializing WebSocket for bot ${botConfig.selfId}`)
+            }
+            await this.connectWebSocket(bot, botConfig.websocket)
+          } else {
+            if (this.debug) {
+              logger.info(`[DEBUG] No WebSocket config for bot ${botConfig.selfId}`)
+            }
           }
         }
-      }
-    })
+      })
     } catch (err) {
       logger.error('MinecraftAdapter initialization failed:', err)
-      // rethrow so Koishi can report the plugin load failure with stack
       throw err
     }
   }
 
-  // 将 message 元素序列化为字符串或简单数组，避免将 Element 实例原样 JSON.stringify 导致丢失内容
-  private serializeOutgoingMessage(message: any) {
-    // 返回值类型：对于数组原样返回字符串数组；对于其它情况返回字符串
+  /**
+   * 生成唯一的请求 ID
+   */
+  private generateEcho(): string {
+    return `koishi_${Date.now()}_${++this.requestCounter}`
+  }
+
+  /**
+   * 将消息转换为 Minecraft 文本组件格式
+   */
+  private toTextComponent(message: any): MinecraftTextComponent[] {
     const extractText = (item: any): string => {
       if (item == null) return ''
       if (typeof item === 'string') return item
       if (typeof item === 'number' || typeof item === 'boolean') return String(item)
       if (Array.isArray(item)) return item.map(extractText).join('')
       if (typeof item === 'object') {
-        // 优先使用标准属性 attrs.content / content / text
         if (item.attrs && typeof item.attrs.content === 'string') return item.attrs.content
         if (typeof item.content === 'string') return item.content
         if (typeof item.text === 'string') return item.text
-        // 支持 children 字段（递归渲染内部元素）
         if (item.children) return extractText(item.children)
-        // 如果对象提供了自定义 toString，则尝试调用
         try {
           if (typeof item.toString === 'function' && item.toString !== Object.prototype.toString) {
             const s = item.toString()
@@ -180,13 +388,12 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
         } catch (e) {
           // ignore
         }
-        // 回退：遍历可枚举属性并拼接文本内容
         let acc = ''
         for (const key in item) {
           try {
             acc += extractText((item as any)[key])
           } catch (e) {
-            // ignore individual property errors
+            // ignore
           }
         }
         return acc
@@ -194,10 +401,53 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       return String(item)
     }
 
-    if (message == null) return ''
-    if (typeof message === 'string') return message
-    if (Array.isArray(message)) return message.map(extractText)
-    return extractText(message)
+    const text = extractText(message)
+    return [{ text }]
+  }
+
+  /**
+   * 发送 WebSocket API 请求并等待响应
+   */
+  private async sendApiRequest<T = any>(
+    ws: WebSocket,
+    api: string,
+    data: any,
+    timeout: number = 10000
+  ): Promise<QueqiaoApiResponse<T>> {
+    return new Promise((resolve, reject) => {
+      const echo = this.generateEcho()
+      const request: QueqiaoApiRequest = { api, data, echo }
+
+      const timeoutId = setTimeout(() => {
+        this.pendingRequests.delete(echo)
+        reject(new Error(`API request timeout: ${api}`))
+      }, timeout)
+
+      this.pendingRequests.set(echo, { resolve, reject, timeout: timeoutId })
+
+      if (this.debug) {
+        logger.info(`[DEBUG] Sending API request:`, request)
+      }
+
+      ws.send(JSON.stringify(request))
+    })
+  }
+
+  /**
+   * 处理 API 响应
+   */
+  private handleApiResponse(response: QueqiaoApiResponse) {
+    if (response.echo && this.pendingRequests.has(String(response.echo))) {
+      const pending = this.pendingRequests.get(String(response.echo))!
+      clearTimeout(pending.timeout)
+      this.pendingRequests.delete(String(response.echo))
+
+      if (response.status === 'SUCCESS') {
+        pending.resolve(response)
+      } else {
+        pending.reject(new Error(response.message || 'API request failed'))
+      }
+    }
   }
 
   private getWebSocketCloseCode(code: number): string {
@@ -250,8 +500,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     this.wsConnections.set(bot.selfId, ws)
     bot.ws = ws
 
-  // (已移除心跳发送与连接状态轮询以减少周期性日志与 ping)
-
     // 添加连接超时处理
     const connectionTimeout = setTimeout(() => {
       if (ws.readyState === WebSocket.CONNECTING) {
@@ -273,7 +521,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       this.reconnectAttempts.set(bot.selfId, 0)
       bot.online()
       clearTimeout(connectionTimeout)
-  // 心跳发送已移除
     })
 
     ws.on('message', (data: WebSocket.RawData) => {
@@ -285,52 +532,21 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
         }
 
         const obj = JSON.parse(text)
-        const postType = obj.post_type
-        const subType = obj.sub_type
-        const eventName = obj.event_name
-        const payload = obj
 
-        // 确定消息类型
-        let type = 'unknown'
-        if (postType === 'message') {
-          if (subType === 'chat' || eventName === 'AsyncPlayerChatEvent') {
-            type = 'chat'
-          }
-        } else if (postType === 'notice') {
-          if (subType === 'join' || eventName === 'PlayerJoinEvent') {
-            type = 'join'
-          } else if (subType === 'leave' || eventName === 'PlayerQuitEvent') {
-            type = 'leave'
-          }
+        // 检查是否是 API 响应
+        if (obj.post_type === 'response') {
+          this.handleApiResponse(obj as QueqiaoApiResponse)
+          return
         }
 
-        if (this.debug) {
-          logger.info(`[DEBUG] Parsed message type: ${type}, post_type: ${postType}, sub_type: ${subType}, event_name: ${eventName}, payload:`, payload)
-        }
-
-        const session = this.createSession(bot, type, payload)
+        // 处理事件
+        const event = obj as QueqiaoEvent
+        const session = this.createSession(bot, event)
         if (session) {
           if (this.debug) {
-              logger.info(`[DEBUG] Created session:`, session)
-              logger.info(`[DEBUG] Preparing to dispatch session to bot ${bot.selfId}`)
-
-              // 进一步追踪 session 内的重要字段，避免直接序列化整个对象导致循环引用问题
-              try {
-                const content = session.content
-                const cid = (session as any).cid || (session as any).channelId || null
-                const gid = (session as any).gid || (session as any).guildId || null
-                const uid = (session as any).uid || (session as any).userId || null
-                const ev = (session as any).event || {}
-                const msg = ev.message || (ev._data && ev._data.message) || null
-                logger.info(`[TRACE] session.content:`, content)
-                logger.info(`[TRACE] session.ids:`, { cid, gid, uid })
-                logger.info(`[TRACE] event.type/message:`, { type: ev.type || ev._type || null, messageContent: msg?.content || msg?.text || null })
-              } catch (err) {
-                logger.warn(`[TRACE] Failed to extract session fields:`, err)
-              }
+            logger.info(`[DEBUG] Created session for event: ${event.event_name}`)
           }
 
-          // 在 dispatch 之前记录完整 session 快照（当 detailedLogging 启用时）
           if (this.detailedLogging) {
             try {
               const snapshot = {
@@ -338,12 +554,10 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
                 content: session.content,
                 elements: session.event?.message?.elements,
                 eventMessage: session.event?.message,
-                eventReferrer: session.event?.referrer,
                 user: session.event?.user,
                 userId: (session as any).userId || session.event?.user?.id,
                 guildId: (session as any).guildId || session.event?.guild?.id,
                 channelId: (session as any).channelId || session.event?.channel?.id,
-                isDirect: (session as any).isDirect,
               }
               logger.info(`[DETAILED] Pre-dispatch session snapshot for bot ${bot.selfId}:`, snapshot)
             } catch (e) {
@@ -355,43 +569,21 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
             bot.dispatch(session)
             if (this.debug) logger.info(`[DEBUG] Session dispatched successfully to bot ${bot.selfId}`)
           } catch (err) {
-            // 记录 dispatch 中上游插件抛出的错误以便定位
             logger.warn(`Dispatch threw an error for bot ${bot.selfId}:`, err)
-            if (this.detailedLogging) {
-              try {
-                const snapshot = {
-                  sessionId: (session as any).id,
-                  content: session.content,
-                  elements: session.event?.message?.elements,
-                  eventMessage: session.event?.message,
-                  eventReferrer: session.event?.referrer,
-                  userId: (session as any).userId || session.event?.user?.id,
-                  guildId: (session as any).guildId || session.event?.guild?.id,
-                }
-                logger.info(`[DETAILED] Dispatch error session snapshot for bot ${bot.selfId}:`, snapshot)
-              } catch (e) {
-                logger.warn(`[DETAILED] Failed to capture session snapshot:`, e)
-              }
-            }
             if (this.debug) {
-              logger.info(`[DEBUG] Dispatch error stack:`, err?.stack || err)
-              // 继续，不抛出，避免影响 WebSocket 消息处理循环
+              logger.info(`[DEBUG] Dispatch error stack:`, (err as Error)?.stack || err)
             }
-          }
-
-          if (this.debug) {
-            logger.info(`[DEBUG] Post-dispatch: you can now check Koishi logs for further processing of this session`)
           }
         } else {
           if (this.debug) {
-            logger.info(`[DEBUG] No session created for message type: ${type}`)
+            logger.info(`[DEBUG] No session created for event: ${event.event_name}`)
           }
         }
       } catch (error) {
         logger.warn('Failed to process WebSocket message:', error)
         if (this.debug) {
           logger.info(`[DEBUG] Raw message data:`, data.toString('utf8'))
-          logger.info(`[DEBUG] Parse error:`, error.message, error.stack)
+          logger.info(`[DEBUG] Parse error:`, (error as Error).message, (error as Error).stack)
         }
       }
     })
@@ -404,8 +596,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       }
       bot.offline()
 
-  // 清理连接相关资源
-
       const attempts = this.reconnectAttempts.get(bot.selfId) || 0
       if (attempts < this.maxReconnectAttempts) {
         this.reconnectAttempts.set(bot.selfId, attempts + 1)
@@ -414,7 +604,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
           logger.info(`[DEBUG] Attempting to reconnect WebSocket for bot ${bot.selfId} in ${delay}ms (attempt ${attempts + 1}/${this.maxReconnectAttempts})`)
         }
         setTimeout(() => {
-          if (!this.wsConnections.has(bot.selfId)) {
+          if (this.wsConnections.get(bot.selfId)?.readyState !== WebSocket.OPEN) {
             this.connectWebSocket(bot, wsConfig)
           }
         }, delay)
@@ -426,32 +616,27 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     ws.on('error', (error) => {
       logger.warn(`WebSocket error for bot ${bot.selfId}:`, error)
       if (this.debug) {
-        logger.info(`[DEBUG] WebSocket error details:`, error.message, error.stack)
+        logger.info(`[DEBUG] WebSocket error details:`, (error as Error).message, (error as Error).stack)
       }
-    })
-
-    ws.on('ping', () => {
-  // ping handling removed
-    })
-
-    ws.on('pong', () => {
-  // pong handling removed
     })
   }
 
-  private createSession(bot: MinecraftBot<C>, type: string, payload: any): Session | undefined {
+  private sessionCounter = 0
+
+  /**
+   * 根据鹊桥 V2 事件创建 Koishi Session
+   */
+  private createSession(bot: MinecraftBot<C>, payload: QueqiaoEvent): Session | undefined {
     if (this.debug) {
-      logger.info(`[DEBUG] Creating session for event type: ${type}, payload:`, payload)
+      logger.info(`[DEBUG] Creating session for event: ${payload.event_name}, payload:`, payload)
     }
 
-    // 创建 Event 对象
     const event: any = {
-      sn: Date.now(), // 简单的时间戳作为序列号
-      type: type === 'chat' ? 'message' : type === 'join' ? 'guild-member-added' : type === 'leave' ? 'guild-member-removed' : type,
+      sn: ++this.sessionCounter,
       login: {
         sn: bot.sn,
-        adapter: 'minecraft-adapter',
-        user: bot.user || { id: bot.selfId, name: bot.selfId }, // 确保 user 对象完整
+        adapter: bot.adapterName,
+        user: bot.user || { id: bot.selfId, name: bot.selfId },
         platform: 'minecraft',
         selfId: bot.selfId,
         status: bot.status,
@@ -459,189 +644,278 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       },
       selfId: bot.selfId,
       platform: 'minecraft',
-      timestamp: (payload.timestamp || Date.now()) * 1000,
+      timestamp: payload.timestamp * 1000,
       referrer: payload,
     }
 
-    // 根据事件类型设置相应的属性
-    switch (type) {
-      case 'chat':
-        const player = payload.player
-        const userId = player?.uuid || player?.display_name || 'unknown'
-        const username = player?.display_name || player?.nickname || userId
+    switch (payload.event_name) {
+      // 玩家聊天事件
+      case 'PlayerChatEvent': {
+        const chatEvent = payload as PlayerChatEvent
+        const player = chatEvent.player
+        const userId = player.uuid || player.nickname
+        const username = player.nickname
 
+        event.type = 'message'
         event.user = {
           id: userId,
           name: username,
-          nick: player?.nickname,
+          nick: username,
+          isOp: player.is_op,
         }
         event.channel = {
-          id: payload.server_name || 'minecraft',
+          id: chatEvent.server_name || 'minecraft',
           type: 0, // TEXT
         }
         event.guild = {
-          id: payload.server_name || 'minecraft',
-          name: payload.server_name || 'Minecraft Server',
-        }
-        // 将元素设为字符串数组（简洁、可靠）：Session.content getter 会对 elements.join("") 返回文本
-  // 规范化消息文本并将其分词为 elements，提升 Koishi 命令解析的准确性
-        let messageText: string = ''
-        if (payload == null) {
-          messageText = ''
-        } else if (typeof payload.message === 'string') {
-          messageText = payload.message
-        } else if (Array.isArray(payload.message)) {
-          // 如果 payload.message 已经是数组，尝试把每项转换为字符串并连接为文本
-          messageText = payload.message.map((it: any) => (typeof it === 'string' ? it : it?.content ?? it?.text ?? JSON.stringify(it))).join(' ')
-        } else if (typeof payload.message === 'object') {
-          // 支持常见 component 对象
-          messageText = payload.message.attrs?.content ?? payload.message.content ?? payload.message.text ?? JSON.stringify(payload.message)
-        } else {
-          messageText = String(payload.message ?? '')
+          id: chatEvent.server_name || 'minecraft',
+          name: chatEvent.server_name || 'Minecraft Server',
         }
 
-  // 先按照配置得到字符串 tokens，然后将它们转换为 Koishi 兼容的元素对象
-  let elements = (() => {
-          if (!messageText) return []
-          const tokens: string[] =
-            this.tokenizeMode === 'none'
-              ? [messageText]
-              : messageText.split(/(\s+)/).filter((s: string) => s.length > 0)
-
-          // 将每个 token 包装为 Koishi h 元素对象，确保 ChatLuna 的 messageTransformer/intercept 能读取到 element.type 和 element.attrs.content
-          // 同时为每个元素添加 toString 方法，保证 elements.join('') 会返回原始文本（用于 session.content 与命令解析）
-          return tokens.map((token) => {
-            const el: any = { type: 'text', attrs: { content: token } }
-            el.toString = function () {
-              return this.attrs?.content ?? ''
-            }
-            return el
-          })
-        })()
-
-  // （已移除 wakeWords 相关处理，适配器保持最小侵入性，由上游中间件负责唤醒逻辑）
-
-        if (this.detailedLogging) {
-          logger.info(`[DEBUG] Message parse details for bot ${bot.selfId}: rawPayloadMessage=`, payload.message)
-          logger.info(`[DEBUG] Message parse details for bot ${bot.selfId}: messageText=`, messageText)
-          logger.info(`[DEBUG] Message parse details for bot ${bot.selfId}: elements=`, elements)
-        }
+        // 解析消息
+        const messageText = chatEvent.message || ''
+        const elements = this.parseMessageToElements(messageText)
 
         event.message = {
-          id: payload.message_id || Date.now().toString(),
+          id: chatEvent.message_id || Date.now().toString(),
           content: messageText,
-          timestamp: (payload.timestamp || Date.now()) * 1000,
-          user: event.user, // 现在 event.user 已经定义了
+          timestamp: payload.timestamp * 1000,
+          user: event.user,
           elements,
-          createdAt: (payload.timestamp || Date.now()) * 1000,
-          updatedAt: (payload.timestamp || Date.now()) * 1000,
+          createdAt: payload.timestamp * 1000,
+          updatedAt: payload.timestamp * 1000,
         }
         break
+      }
 
-      case 'join':
-        const joinPlayer = payload.player
-        const joinUserId = joinPlayer?.uuid || joinPlayer?.display_name || 'unknown'
+      // 玩家命令事件
+      case 'PlayerCommandEvent': {
+        const cmdEvent = payload as PlayerCommandEvent
+        const player = cmdEvent.player
+        const userId = player.uuid || player.nickname
+        const username = player.nickname
 
+        event.type = 'message'
         event.user = {
-          id: joinUserId,
-          name: joinPlayer?.display_name || joinPlayer?.nickname || joinUserId,
-          nick: joinPlayer?.nickname,
+          id: userId,
+          name: username,
+          nick: username,
+          isOp: player.is_op,
+        }
+        event.channel = {
+          id: cmdEvent.server_name || 'minecraft',
+          type: 0,
         }
         event.guild = {
-          id: payload.server_name || 'minecraft',
-          name: payload.server_name || 'Minecraft Server',
+          id: cmdEvent.server_name || 'minecraft',
+          name: cmdEvent.server_name || 'Minecraft Server',
+        }
+
+        // 命令消息
+        const commandText = cmdEvent.command || ''
+        const elements = this.parseMessageToElements(commandText)
+
+        event.message = {
+          id: cmdEvent.message_id || Date.now().toString(),
+          content: commandText,
+          timestamp: payload.timestamp * 1000,
+          user: event.user,
+          elements,
+          createdAt: payload.timestamp * 1000,
+          updatedAt: payload.timestamp * 1000,
+        }
+        // 标记为命令事件
+        event.subtype = 'command'
+        break
+      }
+
+      // 玩家加入事件
+      case 'PlayerJoinEvent': {
+        const joinEvent = payload as PlayerJoinEvent
+        const player = joinEvent.player
+        const userId = player.uuid || player.nickname
+
+        event.type = 'guild-member-added'
+        event.user = {
+          id: userId,
+          name: player.nickname,
+          nick: player.nickname,
+          isOp: player.is_op,
+        }
+        event.guild = {
+          id: joinEvent.server_name || 'minecraft',
+          name: joinEvent.server_name || 'Minecraft Server',
         }
         event.member = {
           user: event.user,
-          nick: joinPlayer?.nickname,
-          joinedAt: (payload.timestamp || Date.now()) * 1000,
+          nick: player.nickname,
+          joinedAt: payload.timestamp * 1000,
         }
         break
+      }
 
-      case 'leave':
-        const leavePlayer = payload.player
-        const leaveUserId = leavePlayer?.uuid || leavePlayer?.display_name || 'unknown'
+      // 玩家离开事件
+      case 'PlayerQuitEvent': {
+        const quitEvent = payload as PlayerQuitEvent
+        const player = quitEvent.player
+        const userId = player.uuid || player.nickname
 
+        event.type = 'guild-member-removed'
         event.user = {
-          id: leaveUserId,
-          name: leavePlayer?.display_name || leavePlayer?.nickname || leaveUserId,
-          nick: leavePlayer?.nickname,
+          id: userId,
+          name: player.nickname,
+          nick: player.nickname,
+          isOp: player.is_op,
         }
         event.guild = {
-          id: payload.server_name || 'minecraft',
-          name: payload.server_name || 'Minecraft Server',
+          id: quitEvent.server_name || 'minecraft',
+          name: quitEvent.server_name || 'Minecraft Server',
         }
         event.member = {
           user: event.user,
-          nick: leavePlayer?.nickname,
+          nick: player.nickname,
         }
         break
+      }
+
+      // 玩家死亡事件
+      case 'PlayerDeathEvent': {
+        const deathEvent = payload as PlayerDeathEvent
+        const player = deathEvent.player
+        const userId = player.uuid || player.nickname
+
+        event.type = 'notice'
+        event.subtype = 'player-death'
+        event.user = {
+          id: userId,
+          name: player.nickname,
+          nick: player.nickname,
+          isOp: player.is_op,
+        }
+        event.guild = {
+          id: deathEvent.server_name || 'minecraft',
+          name: deathEvent.server_name || 'Minecraft Server',
+        }
+        // 从 death 对象提取死亡消息
+        const deathText = deathEvent.death?.text || ''
+        if (deathText) {
+          event.message = {
+            id: Date.now().toString(),
+            content: deathText,
+            timestamp: payload.timestamp * 1000,
+          }
+        }
+        break
+      }
+
+      // 玩家成就事件
+      case 'PlayerAchievementEvent': {
+        const achieveEvent = payload as PlayerAchievementEvent
+        const player = achieveEvent.player
+        const userId = player.uuid || player.nickname
+
+        event.type = 'notice'
+        event.subtype = 'player-achievement'
+        event.user = {
+          id: userId,
+          name: player.nickname,
+          nick: player.nickname,
+          isOp: player.is_op,
+        }
+        event.guild = {
+          id: achieveEvent.server_name || 'minecraft',
+          name: achieveEvent.server_name || 'Minecraft Server',
+        }
+        // 从 achievement 对象提取成就信息
+        const achievementText = achieveEvent.achievement?.display?.title
+          || achieveEvent.achievement?.text
+          || ''
+        if (achievementText) {
+          event.message = {
+            id: Date.now().toString(),
+            content: achievementText,
+            timestamp: payload.timestamp * 1000,
+          }
+        }
+        break
+      }
 
       default:
         if (this.debug) {
-          logger.info(`[DEBUG] Unhandled event type: ${type}, payload:`, payload)
+          logger.info(`[DEBUG] Unhandled event type: ${(payload as any).event_name}`)
         }
-        logger.debug(`Unhandled event type: ${type}`, payload)
         return undefined
     }
 
-    // 使用 bot.session() 方法创建 Session 对象
-    // 添加兼容性的 room/context 字段，便于 downstream 中间件（例如 chatluna）识别房间或上下文
+    // 添加兼容性字段
     try {
       const channelId = event.channel?.id || event.guild?.id || 'minecraft'
-      const roomId = `${event.platform}:${channelId}`
-      ;(event as any).room = { id: roomId }
-      ;(event as any).context = (event as any).context || {}
-      ;(event as any).context.options = Object.assign({}, (event as any).context.options || {}, { room: roomId })
-      // 也在 channel 上放一个兼容别名，便于某些插件直接读取
-      if (event.channel) (event.channel as any).altId = roomId
-      if (this.detailedLogging) {
-        try {
-          logger.info(`[DETAILED] Added compatibility room/context for bot ${bot.selfId}:`, { roomId })
-        } catch (e) {
-          // ignore
-        }
-      }
+      const roomId = `minecraft:${channelId}`
+      event.room = { id: roomId }
+      event.context = event.context || {}
+      event.context.options = { ...(event.context.options || {}), room: roomId }
+      if (event.channel) event.channel.altId = roomId
     } catch (e) {
-      if (this.debug) logger.warn('[DEBUG] Failed to add compatibility room/context:', e)
+      if (this.debug) logger.warn('[DEBUG] Failed to add compatibility fields:', e)
     }
 
     return bot.session(event)
   }
 
+  /**
+   * 解析消息文本为 Koishi 元素数组
+   */
+  private parseMessageToElements(messageText: string): any[] {
+    if (!messageText) return []
+
+    const tokens: string[] =
+      this.tokenizeMode === 'none'
+        ? [messageText]
+        : messageText.split(/(\s+)/).filter((s: string) => s.length > 0)
+
+    return tokens.map((token) => {
+      const el: any = { type: 'text', attrs: { content: token } }
+      el.toString = function () {
+        return this.attrs?.content ?? ''
+      }
+      return el
+    })
+  }
+
+  /**
+   * 发送私聊消息 (send_private_msg)
+   */
   async sendPrivateMessage(player: string, message: string): Promise<void> {
     if (this.debug) {
       logger.info(`[DEBUG] Sending private message to player ${player}: ${message}`)
     }
 
+    const messageComponent = this.toTextComponent(message)
+
     // 优先使用 WebSocket 发送
-    const serialized = this.serializeOutgoingMessage(message)
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
-        const wsMessage = Array.isArray(serialized) ? serialized.join('') : serialized
-        const payload = {
-          api: 'tell',
-          data: { player, message: wsMessage }
+        try {
+          // 鹊桥 V2 API: send_private_msg
+          // 参数: uuid 或 nickname (至少一个), message (Minecraft 文本组件)
+          const response = await this.sendApiRequest(ws, 'send_private_msg', {
+            nickname: player, // 优先使用 nickname
+            message: messageComponent
+          })
+          if (this.debug) {
+            logger.info(`[DEBUG] Private message sent successfully:`, response)
+          }
+          return
+        } catch (error) {
+          logger.warn(`Failed to send private message via WebSocket for bot ${botId}:`, error)
         }
-        if (this.debug) {
-          logger.info(`[DEBUG] Sending via WebSocket:`, payload)
-        }
-        ws.send(JSON.stringify(payload))
-        return
       }
     }
 
     // 回退到 RCON
     for (const [botId, rcon] of this.rconConnections) {
       try {
-        // RCON tellraw expects a JSON text component array
-        let components: any[]
-        if (Array.isArray(serialized)) {
-          components = serialized.map((s) => ({ text: String(s) }))
-        } else {
-          components = [{ text: String(serialized) }]
-        }
-        const json = JSON.stringify(components)
+        const json = JSON.stringify(messageComponent)
         if (this.debug) {
           logger.info(`[DEBUG] Sending via RCON: tellraw ${player} ${json}`)
         }
@@ -655,33 +929,39 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     throw new Error('No available connection to send message')
   }
 
+  /**
+   * 广播消息 (broadcast)
+   */
   async broadcast(message: string): Promise<void> {
     if (this.debug) {
       logger.info(`[DEBUG] Broadcasting message: ${message}`)
     }
 
+    const messageComponent = this.toTextComponent(message)
+
     // 优先使用 WebSocket 发送
-    const serialized = this.serializeOutgoingMessage(message)
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
-        const wsMessage = Array.isArray(serialized) ? serialized.join('') : serialized
-        const payload = {
-          api: 'broadcast',
-          data: { message: wsMessage }
+        try {
+          // 鹊桥 V2 API: broadcast
+          // 参数: message (Minecraft 文本组件)
+          const response = await this.sendApiRequest(ws, 'broadcast', {
+            message: messageComponent
+          })
+          if (this.debug) {
+            logger.info(`[DEBUG] Broadcast sent successfully:`, response)
+          }
+          return
+        } catch (error) {
+          logger.warn(`Failed to broadcast via WebSocket for bot ${botId}:`, error)
         }
-        if (this.debug) {
-          logger.info(`[DEBUG] Broadcasting via WebSocket:`, payload)
-        }
-        ws.send(JSON.stringify(payload))
-        return
       }
     }
 
     // 回退到 RCON
     for (const [botId, rcon] of this.rconConnections) {
       try {
-        // RCON say expects a plain string
-        const text = Array.isArray(serialized) ? serialized.join('') : String(serialized)
+        const text = typeof message === 'string' ? message : JSON.stringify(message)
         if (this.debug) {
           logger.info(`[DEBUG] Broadcasting via RCON: say ${text}`)
         }
@@ -695,10 +975,111 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     throw new Error('No available connection to broadcast message')
   }
 
+  /**
+   * 执行 RCON 命令 (send_rcon_command)
+   */
+  async executeRconCommand(command: string): Promise<string> {
+    if (this.debug) {
+      logger.info(`[DEBUG] Executing RCON command: ${command}`)
+    }
+
+    // 优先使用 WebSocket 发送
+    for (const [botId, ws] of this.wsConnections) {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          // 鹊桥 V2 API: send_rcon_command
+          // 参数: command
+          const response = await this.sendApiRequest<string>(ws, 'send_rcon_command', {
+            command
+          })
+          if (this.debug) {
+            logger.info(`[DEBUG] RCON command executed successfully:`, response)
+          }
+          return response.data || ''
+        } catch (error) {
+          logger.warn(`Failed to execute RCON command via WebSocket for bot ${botId}:`, error)
+        }
+      }
+    }
+
+    // 回退到直接 RCON
+    for (const [botId, rcon] of this.rconConnections) {
+      try {
+        if (this.debug) {
+          logger.info(`[DEBUG] Executing via direct RCON: ${command}`)
+        }
+        return await rcon.send(command)
+      } catch (error) {
+        logger.warn(`Failed to execute RCON command for bot ${botId}:`, error)
+      }
+    }
+
+    throw new Error('No available connection to execute RCON command')
+  }
+
+  /**
+   * 发送标题消息 (title)
+   */
+  async sendTitle(
+    title: string | MinecraftTextComponent,
+    subtitle?: string | MinecraftTextComponent,
+    player?: string
+  ): Promise<void> {
+    const titleComponent = typeof title === 'string' ? { text: title } : title
+    const subtitleComponent = subtitle ? (typeof subtitle === 'string' ? { text: subtitle } : subtitle) : undefined
+
+    for (const [botId, ws] of this.wsConnections) {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          const data: any = { title: titleComponent }
+          if (subtitleComponent) data.subtitle = subtitleComponent
+          if (player) data.nickname = player
+
+          await this.sendApiRequest(ws, 'send_title', data)
+          return
+        } catch (error) {
+          logger.warn(`Failed to send title via WebSocket for bot ${botId}:`, error)
+        }
+      }
+    }
+
+    throw new Error('No available connection to send title')
+  }
+
+  /**
+   * 发送动画栏消息 (action_bar)
+   */
+  async sendActionBar(message: string | MinecraftTextComponent, player?: string): Promise<void> {
+    const messageComponent = typeof message === 'string' ? { text: message } : message
+
+    for (const [botId, ws] of this.wsConnections) {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          const data: any = { message: messageComponent }
+          if (player) data.nickname = player
+
+          await this.sendApiRequest(ws, 'send_actionbar', data)
+          return
+        } catch (error) {
+          logger.warn(`Failed to send action bar via WebSocket for bot ${botId}:`, error)
+        }
+      }
+    }
+
+    throw new Error('No available connection to send action bar')
+  }
+
   async stop() {
     if (this.debug) {
       logger.info(`[DEBUG] Stopping MinecraftAdapter`)
     }
+
+    // 清理所有待处理的请求
+    for (const [echo, pending] of this.pendingRequests) {
+      clearTimeout(pending.timeout)
+      pending.reject(new Error('Adapter stopped'))
+    }
+    this.pendingRequests.clear()
 
     for (const [botId, ws] of this.wsConnections) {
       try {
@@ -720,28 +1101,36 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   }
 }
 
+// ============================================================================
+// Koishi Schema 配置
+// ============================================================================
+
 export namespace MinecraftAdapter {
   export const Config: Schema<MinecraftAdapterConfig> = Schema.object({
     debug: Schema.boolean().description('启用调试模式，输出详细日志').default(false),
+    detailedLogging: Schema.boolean().description('启用详细调试日志（记录入站解析和 dispatch 快照）').default(false),
+    tokenizeMode: Schema.union([
+      Schema.const('split').description('按空白分词（默认）'),
+      Schema.const('none').description('不分词，保留原文')
+    ]).description('入站消息的分词模式').default('split'),
     reconnectInterval: Schema.number().description('重连间隔时间(ms)').default(5000),
     maxReconnectAttempts: Schema.number().description('最大重连尝试次数').default(10),
+    useMessagePrefix: Schema.boolean().description('是否在消息前添加默认前缀（由服务端配置）').default(false),
     bots: Schema.array(Schema.object({
-      selfId: Schema.string().description('机器人 ID').required(),
-      serverName: Schema.string().description('服务器名称'),
+      selfId: Schema.string().description('机器人 ID（唯一标识）').required(),
+      serverName: Schema.string().description('服务器名称（需与鹊桥 config.yml 中的 server_name 一致）'),
       rcon: Schema.object({
         host: Schema.string().description('RCON 主机地址').default('127.0.0.1'),
         port: Schema.number().description('RCON 端口').default(25575),
         password: Schema.string().description('RCON 密码').required(),
         timeout: Schema.number().description('RCON 超时时间(ms)').default(5000),
-      }).description('RCON 配置'),
+      }).description('RCON 配置（可选，用于回退）'),
       websocket: Schema.object({
-        url: Schema.string().description('WebSocket 地址').required(),
-        accessToken: Schema.string().description('访问令牌'),
+        url: Schema.string().description('WebSocket 地址（如 ws://127.0.0.1:8080）').required(),
+        accessToken: Schema.string().description('访问令牌（需与鹊桥 config.yml 中的 access_token 一致）'),
         extraHeaders: Schema.dict(Schema.string()).description('额外请求头'),
       }).description('WebSocket 配置'),
     })).description('机器人配置列表').default([]),
-  detailedLogging: Schema.boolean().description('启用详细调试日志（记录入站解析和 dispatch 快照）').default(false),
-  tokenizeMode: Schema.union([Schema.const('split'), Schema.const('none')]).description('入站消息的分词模式：split=按空白分词（默认），none=不分词，保留原文').default('split'),
   })
 }
 

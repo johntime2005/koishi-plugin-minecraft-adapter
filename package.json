@@ -1,18 +1,18 @@
 {
   "name": "koishi-plugin-minecraft-adapter",
-  "description": "Minecraft adapter for Koishi",
-  "version": "0.5.1-next.7",
+  "description": "Minecraft adapter for Koishi based on QueQiao V2 protocol",
+  "version": "1.0.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
-    "lib",
-    "dist"
+    "lib"
   ],
   "license": "MIT",
-  "author": "",
+  "author": "johntime2005",
+  "homepage": "https://github.com/johntime2005/koishi-plugin-minecraft-adapter",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/johntime2005/koishi-plugin-minecraft-adapter.git"
   },
   "scripts": {
     "build": "tsc",
@@ -29,26 +29,30 @@
     "typescript": "^5.0.0"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "keywords": [
     "koishi",
     "plugin",
     "minecraft",
+    "adapter",
+    "queqiao",
+    "鹊桥",
     "rcon",
     "websocket",
-    "adapter"
+    "mc",
+    "game"
   ],
   "koishi": {
-    "preview": true,
+    "description": {
+      "en": "Minecraft adapter for Koishi based on QueQiao V2 protocol, supports WebSocket events and RCON",
+      "zh": "基于鹊桥 V2 协议的 Koishi Minecraft 适配器，支持 WebSocket 事件和 RCON"
+    },
     "service": {
       "implements": [
         "adapter"
       ]
-    },
-    "description": {
-      "en": "Minecraft adapter for Koishi with RCON and WebSocket support",
-      "zh": "Koishi Minecraft 适配器，支持 RCON 与 WebSocket"
     }
   }
 }
