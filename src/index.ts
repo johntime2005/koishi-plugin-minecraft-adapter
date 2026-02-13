@@ -247,6 +247,13 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftB
 // Koishi Adapter 配置与实现
 // ============================================================================
 
+export interface ChatImageConfig {
+  /** 是否启用 ChatImage CICode 生成（出站方向），默认关闭 */
+  enabled?: boolean
+  /** 图片在聊天栏中的默认显示名称 */
+  defaultImageName?: string
+}
+
 export interface MinecraftAdapterConfig {
   bots: MinecraftBotConfig[]
   debug?: boolean
@@ -256,6 +263,8 @@ export interface MinecraftAdapterConfig {
   maxReconnectAttempts?: number
   /** 是否在消息前添加默认前缀 [鹊桥]，默认不添加（由服务端配置） */
   useMessagePrefix?: boolean
+  /** ChatImage 集成配置 */
+  chatImage?: ChatImageConfig
 }
 
 export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
@@ -273,6 +282,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   private reconnectInterval: number
   private maxReconnectAttempts: number
   private useMessagePrefix: boolean
+  private chatImageEnabled: boolean
+  private chatImageDefaultName: string
 
   constructor(ctx: C, config: MinecraftAdapterConfig) {
     super(ctx)
@@ -283,6 +294,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       this.reconnectInterval = config.reconnectInterval ?? 5000
       this.maxReconnectAttempts = config.maxReconnectAttempts ?? 10
       this.useMessagePrefix = config.useMessagePrefix ?? false
+      this.chatImageEnabled = config.chatImage?.enabled ?? false
+      this.chatImageDefaultName = config.chatImage?.defaultImageName ?? '图片'
 
       if (this.debug) {
         logger.info(`[DEBUG] MinecraftAdapter initialized with config:`, {
@@ -366,43 +379,114 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     return `koishi_${Date.now()}_${++this.requestCounter}`
   }
 
-  /**
-   * 将消息转换为 Minecraft 文本组件格式
-   */
   private toTextComponent(message: any): MinecraftTextComponent[] {
-    const extractText = (item: any): string => {
-      if (item == null) return ''
-      if (typeof item === 'string') return item
-      if (typeof item === 'number' || typeof item === 'boolean') return String(item)
-      if (Array.isArray(item)) return item.map(extractText).join('')
-      if (typeof item === 'object') {
-        if (item.attrs && typeof item.attrs.content === 'string') return item.attrs.content
-        if (typeof item.content === 'string') return item.content
-        if (typeof item.text === 'string') return item.text
-        if (item.children) return extractText(item.children)
+    const raw = this.extractRawText(message)
+    if (!raw) return [{ text: '' }]
+
+    const segments = this.parseOutboundMessage(raw)
+    if (segments.length === 0) return [{ text: '' }]
+
+    const fullText = segments.map(seg => {
+      if (seg.type === 'image') {
+        if (this.chatImageEnabled) {
+          return this.buildCICode(seg.url, seg.name)
+        }
+        return seg.url
+      }
+      return seg.text
+    }).join('')
+
+    return [{ text: fullText }]
+  }
+
+  private extractRawText(message: any): string {
+    if (message == null) return ''
+    if (typeof message === 'string') return message
+    if (typeof message === 'number' || typeof message === 'boolean') return String(message)
+    if (Array.isArray(message)) return message.map(item => this.extractRawText(item)).join('')
+    if (typeof message === 'object') {
+      if (message.attrs && typeof message.attrs.content === 'string') return message.attrs.content
+      if (typeof message.content === 'string') return message.content
+      if (typeof message.text === 'string') return message.text
+      if (message.children) return this.extractRawText(message.children)
+      try {
+        if (typeof message.toString === 'function' && message.toString !== Object.prototype.toString) {
+          const s = message.toString()
+          if (typeof s === 'string' && s !== '[object Object]') return s
+        }
+      } catch (e) {
+        // ignore
+      }
+      let acc = ''
+      for (const key in message) {
         try {
-          if (typeof item.toString === 'function' && item.toString !== Object.prototype.toString) {
-            const s = item.toString()
-            if (typeof s === 'string' && s !== '[object Object]') return s
-          }
+          acc += this.extractRawText((message as any)[key])
         } catch (e) {
           // ignore
         }
-        let acc = ''
-        for (const key in item) {
-          try {
-            acc += extractText((item as any)[key])
-          } catch (e) {
-            // ignore
-          }
-        }
-        return acc
       }
-      return String(item)
+      return acc
+    }
+    return String(message)
+  }
+
+  /**
+   * 生成 ChatImage CICode: [[CICode,url=<url>,name=<name>]]
+   */
+  private buildCICode(url: string, name?: string): string {
+    const displayName = name || this.chatImageDefaultName
+    return `[[CICode,url=${url},name=${displayName}]]`
+  }
+
+  /**
+   * 解析出站消息中的 Koishi 元素标签 (<img src="..."/>, <image url="..."/>)
+   */
+  private parseOutboundMessage(content: string): Array<{ type: 'text'; text: string } | { type: 'image'; url: string; name?: string }> {
+    const segments: Array<{ type: 'text'; text: string } | { type: 'image'; url: string; name?: string }> = []
+    const imgTagRegex = /<(?:img|image)\s+([^>]*?)\/?>(?:<\/(?:img|image)>)?/gi
+    let lastIndex = 0
+    let match: RegExpExecArray | null
+
+    while ((match = imgTagRegex.exec(content)) !== null) {
+      if (match.index > lastIndex) {
+        segments.push({ type: 'text', text: content.slice(lastIndex, match.index) })
+      }
+
+      const attrs = match[1]
+      const rawUrl = this.extractAttr(attrs, 'src') || this.extractAttr(attrs, 'url')
+      if (rawUrl) {
+        const url = this.decodeHtmlEntities(rawUrl)
+        const name = this.extractAttr(attrs, 'alt') || this.extractAttr(attrs, 'name') || this.extractAttr(attrs, 'summary')
+        segments.push({ type: 'image', url, name: name || undefined })
+      }
+
+      lastIndex = match.index + match[0].length
     }
 
-    const text = extractText(message)
-    return [{ text }]
+    if (lastIndex < content.length) {
+      segments.push({ type: 'text', text: content.slice(lastIndex) })
+    }
+
+    return segments
+  }
+
+  // 从 HTML 属性字符串中提取指定属性值: name="val" | name='val' | name=val
+  private extractAttr(attrs: string, name: string): string | null {
+    const regex = new RegExp(`${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|(\\S+))`, 'i')
+    const match = regex.exec(attrs)
+    if (!match) return null
+    return match[1] ?? match[2] ?? match[3] ?? null
+  }
+
+  private decodeHtmlEntities(str: string): string {
+    return str
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
   }
 
   /**
@@ -864,22 +948,80 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
   /**
    * 解析消息文本为 Koishi 元素数组
+   * 入站方向始终解析 CICode 和裸图片 URL（不受 chatImage.enabled 控制）
    */
   private parseMessageToElements(messageText: string): any[] {
     if (!messageText) return []
 
+    const elements: any[] = []
+    // CICode: [[CICode,url=<url>(,name=<name>)(,nsfw=<bool>)(,pre=<p>)(,suf=<s>)]]
+    // 裸图片 URL: https?://....(png|jpg|jpeg|gif|bmp|ico|jfif|webp)
+    const ciCodePattern = /\[\[CICode,([^\]]*)\]\]/g
+    const imageUrlPattern = /https?:\/\/\S+\.(?:png|jpe?g|gif|bmp|ico|jfif|webp)(?:\?[^\s]*)?/gi
+    const combinedPattern = new RegExp(
+      `(${ciCodePattern.source})|(${imageUrlPattern.source})`,
+      'gi'
+    )
+
+    let lastIndex = 0
+    let match: RegExpExecArray | null
+
+    while ((match = combinedPattern.exec(messageText)) !== null) {
+      if (match.index > lastIndex) {
+        const textBefore = messageText.slice(lastIndex, match.index)
+        this.addTextElements(elements, textBefore)
+      }
+
+      if (match[1]) {
+        const params = match[2]
+        const url = this.extractCICodeParam(params, 'url')
+        if (url) {
+          const el: any = { type: 'img', attrs: { src: url } }
+          const name = this.extractCICodeParam(params, 'name')
+          if (name) el.attrs.alt = name
+          el.toString = function () { return `[${this.attrs.alt || '图片'}]` }
+          elements.push(el)
+        }
+      } else {
+        const url = match[0]
+        const el: any = { type: 'img', attrs: { src: url } }
+        el.toString = function () { return `[图片]` }
+        elements.push(el)
+      }
+
+      lastIndex = match.index + match[0].length
+    }
+
+    if (lastIndex < messageText.length) {
+      const textAfter = messageText.slice(lastIndex)
+      this.addTextElements(elements, textAfter)
+    }
+
+    if (elements.length === 0) {
+      this.addTextElements(elements, messageText)
+    }
+
+    return elements
+  }
+
+  // 提取 CICode 参数: "url=xxx,name=yyy" => { url: "xxx", name: "yyy" }
+  private extractCICodeParam(params: string, key: string): string | null {
+    const regex = new RegExp(`(?:^|,)${key}=([^,]*)`, 'i')
+    const match = regex.exec(params)
+    return match ? match[1] : null
+  }
+
+  private addTextElements(elements: any[], text: string): void {
     const tokens: string[] =
       this.tokenizeMode === 'none'
-        ? [messageText]
-        : messageText.split(/(\s+)/).filter((s: string) => s.length > 0)
+        ? [text]
+        : text.split(/(\s+)/).filter((s: string) => s.length > 0)
 
-    return tokens.map((token) => {
+    for (const token of tokens) {
       const el: any = { type: 'text', attrs: { content: token } }
-      el.toString = function () {
-        return this.attrs?.content ?? ''
-      }
-      return el
-    })
+      el.toString = function () { return this.attrs?.content ?? '' }
+      elements.push(el)
+    }
   }
 
   /**
@@ -1116,6 +1258,10 @@ export namespace MinecraftAdapter {
     reconnectInterval: Schema.number().description('重连间隔时间(ms)').default(5000),
     maxReconnectAttempts: Schema.number().description('最大重连尝试次数').default(10),
     useMessagePrefix: Schema.boolean().description('是否在消息前添加默认前缀（由服务端配置）').default(false),
+    chatImage: Schema.object({
+      enabled: Schema.boolean().description('启用 ChatImage CICode 图片发送（需客户端安装 ChatImage Mod）').default(false),
+      defaultImageName: Schema.string().description('图片在聊天栏中的默认显示名称').default('图片'),
+    }).description('ChatImage 图片显示集成配置'),
     bots: Schema.array(Schema.object({
       selfId: Schema.string().description('机器人 ID（唯一标识）').required(),
       serverName: Schema.string().description('服务器名称（需与鹊桥 config.yml 中的 server_name 一致）'),

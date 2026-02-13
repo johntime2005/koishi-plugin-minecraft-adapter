@@ -178,6 +178,12 @@ export declare class MinecraftBot<C extends Context = Context> extends Bot<C, Mi
      */
     executeCommand(command: string): Promise<string>;
 }
+export interface ChatImageConfig {
+    /** 是否启用 ChatImage CICode 生成（出站方向），默认关闭 */
+    enabled?: boolean;
+    /** 图片在聊天栏中的默认显示名称 */
+    defaultImageName?: string;
+}
 export interface MinecraftAdapterConfig {
     bots: MinecraftBotConfig[];
     debug?: boolean;
@@ -187,6 +193,8 @@ export interface MinecraftAdapterConfig {
     maxReconnectAttempts?: number;
     /** 是否在消息前添加默认前缀 [鹊桥]，默认不添加（由服务端配置） */
     useMessagePrefix?: boolean;
+    /** ChatImage 集成配置 */
+    chatImage?: ChatImageConfig;
 }
 export declare class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
     static reusable: boolean;
@@ -201,15 +209,25 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private reconnectInterval;
     private maxReconnectAttempts;
     private useMessagePrefix;
+    private chatImageEnabled;
+    private chatImageDefaultName;
     constructor(ctx: C, config: MinecraftAdapterConfig);
     /**
      * 生成唯一的请求 ID
      */
     private generateEcho;
-    /**
-     * 将消息转换为 Minecraft 文本组件格式
-     */
     private toTextComponent;
+    private extractRawText;
+    /**
+     * 生成 ChatImage CICode: [[CICode,url=<url>,name=<name>]]
+     */
+    private buildCICode;
+    /**
+     * 解析出站消息中的 Koishi 元素标签 (<img src="..."/>, <image url="..."/>)
+     */
+    private parseOutboundMessage;
+    private extractAttr;
+    private decodeHtmlEntities;
     /**
      * 发送 WebSocket API 请求并等待响应
      */
@@ -228,8 +246,11 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private createSession;
     /**
      * 解析消息文本为 Koishi 元素数组
+     * 入站方向始终解析 CICode 和裸图片 URL（不受 chatImage.enabled 控制）
      */
     private parseMessageToElements;
+    private extractCICodeParam;
+    private addTextElements;
     /**
      * 发送私聊消息 (send_private_msg)
      */
