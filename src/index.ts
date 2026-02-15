@@ -232,7 +232,6 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftB
 
   /**
    * 执行 RCON 命令
-   * 优先使用 WebSocket send_rcon_command 接口，回退到直接 RCON 连接
    */
   async executeCommand(command: string): Promise<string> {
     if (this.adapter instanceof MinecraftAdapter) {
@@ -265,6 +264,7 @@ export interface MinecraftAdapterConfig {
   useMessagePrefix?: boolean
   /** ChatImage 集成配置 */
   chatImage?: ChatImageConfig
+
 }
 
 export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
@@ -284,6 +284,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   private useMessagePrefix: boolean
   private chatImageEnabled: boolean
   private chatImageDefaultName: string
+
 
   constructor(ctx: C, config: MinecraftAdapterConfig) {
     super(ctx)
@@ -321,29 +322,35 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
           bot.adapter = this
           this.bots.push(bot)
 
-          // 初始化 RCON 连接
-          if (botConfig.rcon && botConfig.rcon.host && botConfig.rcon.port && botConfig.rcon.password) {
-            try {
-              if (this.debug) {
-                logger.info(`[DEBUG] Connecting RCON for bot ${botConfig.selfId} to ${botConfig.rcon.host}:${botConfig.rcon.port}`)
-              }
+          // 并行初始化 RCON 和 WebSocket 连接
+          const connectTasks: Promise<void>[] = []
 
-              const rcon = await Rcon.connect({
-                host: botConfig.rcon.host,
-                port: botConfig.rcon.port,
-                password: botConfig.rcon.password,
-                timeout: botConfig.rcon.timeout || 5000,
-              })
-              this.rconConnections.set(botConfig.selfId, rcon)
-              bot.rcon = rcon
-              logger.info(`RCON connected for bot ${botConfig.selfId}`)
-            } catch (error) {
-              logger.warn(`Failed to connect RCON for bot ${botConfig.selfId}:`, error)
-              if (this.debug) {
-                logger.info(`[DEBUG] RCON connection error details:`, (error as Error).message, (error as Error).stack)
+          // RCON 连接（用于执行服务器命令）
+          if (botConfig.rcon && botConfig.rcon.host && botConfig.rcon.port && botConfig.rcon.password) {
+            connectTasks.push((async () => {
+              try {
+                if (this.debug) {
+                  logger.info(`[DEBUG] Connecting RCON for bot ${botConfig.selfId} to ${botConfig.rcon!.host}:${botConfig.rcon!.port}`)
+                }
+
+                const rcon = await Rcon.connect({
+                  host: botConfig.rcon!.host,
+                  port: botConfig.rcon!.port,
+                  password: botConfig.rcon!.password,
+                  timeout: botConfig.rcon!.timeout || 5000,
+                })
+                this.rconConnections.set(botConfig.selfId, rcon)
+                bot.rcon = rcon
+                logger.info(`RCON connected for bot ${botConfig.selfId}`)
+              } catch (error) {
+                logger.warn(`Failed to connect RCON for bot ${botConfig.selfId}:`, error)
+                if (this.debug) {
+                  logger.info(`[DEBUG] RCON connection error details:`, (error as Error).message, (error as Error).stack)
+                }
               }
-            }
+            })())
           } else {
+            logger.warn(`RCON not configured for bot ${botConfig.selfId} — server commands (executeRconCommand) will not be available`)
             if (this.debug) {
               if (botConfig.rcon) {
                 logger.info(`[DEBUG] RCON config incomplete for bot ${botConfig.selfId}, skipping (need host, port, password)`)
@@ -353,17 +360,22 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
             }
           }
 
-          // 初始化 WebSocket 连接
+          // WebSocket 连接（用于事件接收和消息发送）
           if (botConfig.websocket) {
-            if (this.debug) {
-              logger.info(`[DEBUG] Initializing WebSocket for bot ${botConfig.selfId}`)
-            }
-            await this.connectWebSocket(bot, botConfig.websocket)
+            connectTasks.push((async () => {
+              if (this.debug) {
+                logger.info(`[DEBUG] Initializing WebSocket for bot ${botConfig.selfId}`)
+              }
+              await this.connectWebSocket(bot, botConfig.websocket!)
+            })())
           } else {
             if (this.debug) {
               logger.info(`[DEBUG] No WebSocket config for bot ${botConfig.selfId}`)
             }
           }
+
+          // 等待所有连接并行完成
+          await Promise.allSettled(connectTasks)
         }
       })
     } catch (err) {
@@ -1034,14 +1046,11 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
     const messageComponent = this.toTextComponent(message)
 
-    // 优先使用 WebSocket 发送
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
         try {
-          // 鹊桥 V2 API: send_private_msg
-          // 参数: uuid 或 nickname (至少一个), message (Minecraft 文本组件)
           const response = await this.sendApiRequest(ws, 'send_private_msg', {
-            nickname: player, // 优先使用 nickname
+            nickname: player,
             message: messageComponent
           })
           if (this.debug) {
@@ -1054,21 +1063,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       }
     }
 
-    // 回退到 RCON
-    for (const [botId, rcon] of this.rconConnections) {
-      try {
-        const json = JSON.stringify(messageComponent)
-        if (this.debug) {
-          logger.info(`[DEBUG] Sending via RCON: tellraw ${player} ${json}`)
-        }
-        await rcon.send(`tellraw ${player} ${json}`)
-        return
-      } catch (error) {
-        logger.warn(`Failed to send message via RCON for bot ${botId}:`, error)
-      }
-    }
-
-    throw new Error('No available connection to send message')
+    throw new Error('No available WebSocket connection to send private message')
   }
 
   /**
@@ -1081,12 +1076,9 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
     const messageComponent = this.toTextComponent(message)
 
-    // 优先使用 WebSocket 发送
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
         try {
-          // 鹊桥 V2 API: broadcast
-          // 参数: message (Minecraft 文本组件)
           const response = await this.sendApiRequest(ws, 'broadcast', {
             message: messageComponent
           })
@@ -1100,21 +1092,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       }
     }
 
-    // 回退到 RCON
-    for (const [botId, rcon] of this.rconConnections) {
-      try {
-        const text = typeof message === 'string' ? message : JSON.stringify(message)
-        if (this.debug) {
-          logger.info(`[DEBUG] Broadcasting via RCON: say ${text}`)
-        }
-        await rcon.send(`say ${text}`)
-        return
-      } catch (error) {
-        logger.warn(`Failed to broadcast via RCON for bot ${botId}:`, error)
-      }
-    }
-
-    throw new Error('No available connection to broadcast message')
+    throw new Error('No available WebSocket connection to broadcast message')
   }
 
   /**
@@ -1125,30 +1103,10 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       logger.info(`[DEBUG] Executing RCON command: ${command}`)
     }
 
-    // 优先使用 WebSocket 发送
-    for (const [botId, ws] of this.wsConnections) {
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          // 鹊桥 V2 API: send_rcon_command
-          // 参数: command
-          const response = await this.sendApiRequest<string>(ws, 'send_rcon_command', {
-            command
-          })
-          if (this.debug) {
-            logger.info(`[DEBUG] RCON command executed successfully:`, response)
-          }
-          return response.data || ''
-        } catch (error) {
-          logger.warn(`Failed to execute RCON command via WebSocket for bot ${botId}:`, error)
-        }
-      }
-    }
-
-    // 回退到直接 RCON
     for (const [botId, rcon] of this.rconConnections) {
       try {
         if (this.debug) {
-          logger.info(`[DEBUG] Executing via direct RCON: ${command}`)
+          logger.info(`[DEBUG] Executing via RCON for bot ${botId}: ${command}`)
         }
         return await rcon.send(command)
       } catch (error) {
@@ -1156,7 +1114,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       }
     }
 
-    throw new Error('No available connection to execute RCON command')
+    throw new Error('RCON not available: no active RCON connection to execute command')
   }
 
   /**
@@ -1270,7 +1228,7 @@ export namespace MinecraftAdapter {
         port: Schema.number().description('RCON 端口').default(25575),
         password: Schema.string().description('RCON 密码').required(),
         timeout: Schema.number().description('RCON 超时时间(ms)').default(5000),
-      }).description('RCON 配置（可选，用于回退）'),
+      }).description('RCON 配置（用于执行服务器命令）'),
       websocket: Schema.object({
         url: Schema.string().description('WebSocket 地址（如 ws://127.0.0.1:8080）').required(),
         accessToken: Schema.string().description('访问令牌（需与鹊桥 config.yml 中的 access_token 一致）'),

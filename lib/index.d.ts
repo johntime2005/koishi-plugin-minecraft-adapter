@@ -174,7 +174,6 @@ export declare class MinecraftBot<C extends Context = Context> extends Bot<C, Mi
     sendPrivateMessage(userId: string, content: string): Promise<string[]>;
     /**
      * 执行 RCON 命令
-     * 优先使用 WebSocket send_rcon_command 接口，回退到直接 RCON 连接
      */
     executeCommand(command: string): Promise<string>;
 }
