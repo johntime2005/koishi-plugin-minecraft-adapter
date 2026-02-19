@@ -145,25 +145,69 @@ export interface QueqiaoApiResponse<T = any> {
     data?: T;
     echo?: string | number;
 }
-export interface MinecraftBotConfig {
+/**
+ * ChatImage 集成配置
+ */
+export interface ChatImageConfig {
+    /** 是否启用 ChatImage CICode 生成（出站方向），默认关闭 */
+    enabled?: boolean;
+    /** 图片在聊天栏中的默认显示名称 */
+    defaultImageName?: string;
+}
+/**
+ * 单个服务器的配置
+ * 每个服务器对应一个独立的 bot 实例
+ */
+export interface ServerConfig {
+    /** 机器人 ID（唯一标识） */
     selfId: string;
+    /** 服务器名称（需与鹊桥 config.yml 中的 server_name 一致） */
     serverName?: string;
+    /** WebSocket 配置（用于事件接收和消息发送） */
+    websocket: {
+        /** WebSocket 地址（如 ws://127.0.0.1:8080） */
+        url: string;
+        /** 访问令牌（需与鹊桥 config.yml 中的 access_token 一致） */
+        accessToken?: string;
+        /** 额外请求头 */
+        extraHeaders?: Record<string, string>;
+    };
+    /** RCON 配置（用于执行服务器命令，与 WebSocket 并行工作） */
     rcon?: {
         host: string;
         port: number;
         password: string;
         timeout?: number;
     };
-    websocket?: {
-        url: string;
-        accessToken?: string;
-        extraHeaders?: Record<string, string>;
-    };
+    /** ChatImage 图片显示配置（仅对此服务器生效） */
+    chatImage?: ChatImageConfig;
 }
-export declare class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftBotConfig> {
+/** @deprecated 请使用 ServerConfig */
+export type MinecraftBotConfig = ServerConfig;
+export interface MinecraftAdapterConfig {
+    /** 服务器配置列表 */
+    servers: ServerConfig[];
+    /** 启用调试模式 */
+    debug?: boolean;
+    /** 启用详细调试日志 */
+    detailedLogging?: boolean;
+    /** 入站消息分词模式 */
+    tokenizeMode?: 'split' | 'none';
+    /** 重连间隔时间(ms) */
+    reconnectInterval?: number;
+    /** 最大重连尝试次数 */
+    maxReconnectAttempts?: number;
+    /** 是否在消息前添加默认前缀 */
+    useMessagePrefix?: boolean;
+}
+export declare class MinecraftBot<C extends Context = Context> extends Bot<C, ServerConfig> {
     rcon?: Rcon;
     ws?: WebSocket;
-    constructor(ctx: C, config: MinecraftBotConfig);
+    /** 此服务器是否启用 ChatImage CICode */
+    chatImageEnabled: boolean;
+    /** 此服务器的 ChatImage 默认图片名称 */
+    chatImageDefaultName: string;
+    constructor(ctx: C, config: ServerConfig);
     /**
      * 发送消息到频道或私聊
      */
@@ -173,27 +217,9 @@ export declare class MinecraftBot<C extends Context = Context> extends Bot<C, Mi
      */
     sendPrivateMessage(userId: string, content: string): Promise<string[]>;
     /**
-     * 执行 RCON 命令
+     * 执行 RCON 命令（用于执行服务器命令，与 WebSocket 并行工作）
      */
     executeCommand(command: string): Promise<string>;
-}
-export interface ChatImageConfig {
-    /** 是否启用 ChatImage CICode 生成（出站方向），默认关闭 */
-    enabled?: boolean;
-    /** 图片在聊天栏中的默认显示名称 */
-    defaultImageName?: string;
-}
-export interface MinecraftAdapterConfig {
-    bots: MinecraftBotConfig[];
-    debug?: boolean;
-    detailedLogging?: boolean;
-    tokenizeMode?: 'split' | 'none';
-    reconnectInterval?: number;
-    maxReconnectAttempts?: number;
-    /** 是否在消息前添加默认前缀 [鹊桥]，默认不添加（由服务端配置） */
-    useMessagePrefix?: boolean;
-    /** ChatImage 集成配置 */
-    chatImage?: ChatImageConfig;
 }
 export declare class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
     static reusable: boolean;
@@ -208,9 +234,7 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private reconnectInterval;
     private maxReconnectAttempts;
     private useMessagePrefix;
-    private chatImageEnabled;
-    private chatImageDefaultName;
-    constructor(ctx: C, config: MinecraftAdapterConfig);
+    constructor(ctx: C, rawConfig: MinecraftAdapterConfig);
     /**
      * 生成唯一的请求 ID
      */
@@ -253,23 +277,11 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     /**
      * 发送私聊消息 (send_private_msg)
      */
-    sendPrivateMessage(player: string, message: string): Promise<void>;
-    /**
-     * 广播消息 (broadcast)
-     */
-    broadcast(message: string): Promise<void>;
-    /**
-     * 执行 RCON 命令 (send_rcon_command)
-     */
-    executeRconCommand(command: string): Promise<string>;
-    /**
-     * 发送标题消息 (title)
-     */
-    sendTitle(title: string | MinecraftTextComponent, subtitle?: string | MinecraftTextComponent, player?: string): Promise<void>;
-    /**
-     * 发送动画栏消息 (action_bar)
-     */
-    sendActionBar(message: string | MinecraftTextComponent, player?: string): Promise<void>;
+    sendPrivateMessage(player: string, message: string, bot?: MinecraftBot<C>): Promise<void>;
+    broadcast(message: string, bot?: MinecraftBot<C>): Promise<void>;
+    executeRconCommand(command: string, bot?: MinecraftBot<C>): Promise<string>;
+    sendTitle(title: string | MinecraftTextComponent, subtitle?: string | MinecraftTextComponent, player?: string, bot?: MinecraftBot<C>): Promise<void>;
+    sendActionBar(message: string | MinecraftTextComponent, player?: string, bot?: MinecraftBot<C>): Promise<void>;
     stop(): Promise<void>;
 }
 export declare namespace MinecraftAdapter {
