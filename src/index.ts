@@ -174,33 +174,118 @@ export interface QueqiaoApiResponse<T = any> {
 }
 
 // ============================================================================
-// Koishi Bot 配置与实现
+// 配置类型定义
 // ============================================================================
 
-export interface MinecraftBotConfig {
+/**
+ * ChatImage 集成配置
+ */
+export interface ChatImageConfig {
+  /** 是否启用 ChatImage CICode 生成（出站方向），默认关闭 */
+  enabled?: boolean
+  /** 图片在聊天栏中的默认显示名称 */
+  defaultImageName?: string
+}
+
+/**
+ * 单个服务器的配置
+ * 每个服务器对应一个独立的 bot 实例
+ */
+export interface ServerConfig {
+  /** 机器人 ID（唯一标识） */
   selfId: string
+  /** 服务器名称（需与鹊桥 config.yml 中的 server_name 一致） */
   serverName?: string
+  /** WebSocket 配置（用于事件接收和消息发送） */
+  websocket: {
+    /** WebSocket 地址（如 ws://127.0.0.1:8080） */
+    url: string
+    /** 访问令牌（需与鹊桥 config.yml 中的 access_token 一致） */
+    accessToken?: string
+    /** 额外请求头 */
+    extraHeaders?: Record<string, string>
+  }
+  /** RCON 配置（用于执行服务器命令，与 WebSocket 并行工作） */
   rcon?: {
     host: string
     port: number
     password: string
     timeout?: number
   }
-  websocket?: {
-    url: string
-    accessToken?: string
-    extraHeaders?: Record<string, string>
-  }
+  /** ChatImage 图片显示配置（仅对此服务器生效） */
+  chatImage?: ChatImageConfig
 }
 
-export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftBotConfig> {
+/** @deprecated 请使用 ServerConfig */
+export type MinecraftBotConfig = ServerConfig
+
+// ============================================================================
+// 适配器配置
+// ============================================================================
+
+export interface MinecraftAdapterConfig {
+  /** 服务器配置列表 */
+  servers: ServerConfig[]
+  /** 启用调试模式 */
+  debug?: boolean
+  /** 启用详细调试日志 */
+  detailedLogging?: boolean
+  /** 入站消息分词模式 */
+  tokenizeMode?: 'split' | 'none'
+  /** 重连间隔时间(ms) */
+  reconnectInterval?: number
+  /** 最大重连尝试次数 */
+  maxReconnectAttempts?: number
+  /** 是否在消息前添加默认前缀 */
+  useMessagePrefix?: boolean
+}
+
+/**
+ * 向后兼容：将旧版配置（bots + 全局 chatImage）迁移为新格式（servers + 每服务器 chatImage）
+ */
+function migrateConfig(raw: any): MinecraftAdapterConfig {
+  if (raw.bots && !raw.servers) {
+    logger.warn(
+      '[迁移提示] 检测到旧版配置格式（使用 "bots" 字段）。' +
+      '请迁移到新的 "servers" 格式，详见 README。' +
+      '旧格式将在未来版本中移除。'
+    )
+    const globalChatImage = raw.chatImage
+    const servers: ServerConfig[] = (raw.bots as any[]).map(bot => ({
+      ...bot,
+      chatImage: bot.chatImage ?? globalChatImage,
+    }))
+    return {
+      debug: raw.debug,
+      detailedLogging: raw.detailedLogging,
+      tokenizeMode: raw.tokenizeMode,
+      reconnectInterval: raw.reconnectInterval,
+      maxReconnectAttempts: raw.maxReconnectAttempts,
+      useMessagePrefix: raw.useMessagePrefix,
+      servers,
+    }
+  }
+  return raw as MinecraftAdapterConfig
+}
+
+// ============================================================================
+// Koishi Bot 实现
+// ============================================================================
+
+export class MinecraftBot<C extends Context = Context> extends Bot<C, ServerConfig> {
   public rcon?: Rcon
   public ws?: WebSocket
+  /** 此服务器是否启用 ChatImage CICode */
+  public chatImageEnabled: boolean
+  /** 此服务器的 ChatImage 默认图片名称 */
+  public chatImageDefaultName: string
 
-  constructor(ctx: C, config: MinecraftBotConfig) {
+  constructor(ctx: C, config: ServerConfig) {
     super(ctx, config, 'minecraft')
     this.selfId = config.selfId
     this.platform = 'minecraft'
+    this.chatImageEnabled = config.chatImage?.enabled ?? false
+    this.chatImageDefaultName = config.chatImage?.defaultImageName ?? '图片'
   }
 
   /**
@@ -212,7 +297,7 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftB
       return await this.sendPrivateMessage(player, content)
     } else {
       if (this.adapter instanceof MinecraftAdapter) {
-        await this.adapter.broadcast(content)
+        await this.adapter.broadcast(content, this)
         return []
       }
       return []
@@ -224,18 +309,18 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftB
    */
   async sendPrivateMessage(userId: string, content: string): Promise<string[]> {
     if (this.adapter instanceof MinecraftAdapter) {
-      await this.adapter.sendPrivateMessage(userId, content)
+      await this.adapter.sendPrivateMessage(userId, content, this)
       return []
     }
     return []
   }
 
   /**
-   * 执行 RCON 命令
+   * 执行 RCON 命令（用于执行服务器命令，与 WebSocket 并行工作）
    */
   async executeCommand(command: string): Promise<string> {
     if (this.adapter instanceof MinecraftAdapter) {
-      return await this.adapter.executeRconCommand(command)
+      return await this.adapter.executeRconCommand(command, this)
     }
     if (!this.rcon) throw new Error('RCON not connected')
     return await this.rcon.send(command)
@@ -243,29 +328,8 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, MinecraftB
 }
 
 // ============================================================================
-// Koishi Adapter 配置与实现
+// Koishi Adapter 实现
 // ============================================================================
-
-export interface ChatImageConfig {
-  /** 是否启用 ChatImage CICode 生成（出站方向），默认关闭 */
-  enabled?: boolean
-  /** 图片在聊天栏中的默认显示名称 */
-  defaultImageName?: string
-}
-
-export interface MinecraftAdapterConfig {
-  bots: MinecraftBotConfig[]
-  debug?: boolean
-  detailedLogging?: boolean
-  tokenizeMode?: 'split' | 'none'
-  reconnectInterval?: number
-  maxReconnectAttempts?: number
-  /** 是否在消息前添加默认前缀 [鹊桥]，默认不添加（由服务端配置） */
-  useMessagePrefix?: boolean
-  /** ChatImage 集成配置 */
-  chatImage?: ChatImageConfig
-
-}
 
 export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
   static reusable = true
@@ -282,99 +346,93 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   private reconnectInterval: number
   private maxReconnectAttempts: number
   private useMessagePrefix: boolean
-  private chatImageEnabled: boolean
-  private chatImageDefaultName: string
 
-
-  constructor(ctx: C, config: MinecraftAdapterConfig) {
+  constructor(ctx: C, rawConfig: MinecraftAdapterConfig) {
     super(ctx)
     try {
+      const config = migrateConfig(rawConfig)
+
       this.debug = config.debug ?? false
       this.detailedLogging = config.detailedLogging ?? false
       this.tokenizeMode = config.tokenizeMode ?? 'split'
       this.reconnectInterval = config.reconnectInterval ?? 5000
       this.maxReconnectAttempts = config.maxReconnectAttempts ?? 10
       this.useMessagePrefix = config.useMessagePrefix ?? false
-      this.chatImageEnabled = config.chatImage?.enabled ?? false
-      this.chatImageDefaultName = config.chatImage?.defaultImageName ?? '图片'
 
       if (this.debug) {
         logger.info(`[DEBUG] MinecraftAdapter initialized with config:`, {
           debug: this.debug,
           reconnectInterval: this.reconnectInterval,
           maxReconnectAttempts: this.maxReconnectAttempts,
-          botCount: config.bots.length
+          serverCount: config.servers.length
         })
       }
 
-      // 为每个配置创建机器人
       ctx.on('ready', async () => {
         if (this.debug) {
-          logger.info(`[DEBUG] Koishi ready event triggered, initializing ${config.bots.length} bots`)
+          logger.info(`[DEBUG] Koishi ready event triggered, initializing ${config.servers.length} server(s)`)
         }
 
-        for (const botConfig of config.bots) {
+        for (const serverConfig of config.servers) {
           if (this.debug) {
-            logger.info(`[DEBUG] Initializing bot ${botConfig.selfId}`)
+            logger.info(`[DEBUG] Initializing server ${serverConfig.selfId}`)
           }
 
-          const bot = new MinecraftBot(ctx, botConfig)
+          const bot = new MinecraftBot(ctx, serverConfig)
           bot.adapter = this
           this.bots.push(bot)
 
-          // 并行初始化 RCON 和 WebSocket 连接
           const connectTasks: Promise<void>[] = []
 
-          // RCON 连接（用于执行服务器命令）
-          if (botConfig.rcon && botConfig.rcon.host && botConfig.rcon.port && botConfig.rcon.password) {
+          // RCON（用于执行服务器命令，与 WebSocket 并行工作）
+          if (serverConfig.rcon && serverConfig.rcon.host && serverConfig.rcon.port && serverConfig.rcon.password) {
             connectTasks.push((async () => {
               try {
                 if (this.debug) {
-                  logger.info(`[DEBUG] Connecting RCON for bot ${botConfig.selfId} to ${botConfig.rcon!.host}:${botConfig.rcon!.port}`)
+                  logger.info(`[DEBUG] Connecting RCON for server ${serverConfig.selfId} to ${serverConfig.rcon!.host}:${serverConfig.rcon!.port}`)
                 }
 
                 const rcon = await Rcon.connect({
-                  host: botConfig.rcon!.host,
-                  port: botConfig.rcon!.port,
-                  password: botConfig.rcon!.password,
-                  timeout: botConfig.rcon!.timeout || 5000,
+                  host: serverConfig.rcon!.host,
+                  port: serverConfig.rcon!.port,
+                  password: serverConfig.rcon!.password,
+                  timeout: serverConfig.rcon!.timeout || 5000,
                 })
-                this.rconConnections.set(botConfig.selfId, rcon)
+                this.rconConnections.set(serverConfig.selfId, rcon)
                 bot.rcon = rcon
-                logger.info(`RCON connected for bot ${botConfig.selfId}`)
+                logger.info(`RCON connected for server ${serverConfig.selfId} — ready for command execution`)
               } catch (error) {
-                logger.warn(`Failed to connect RCON for bot ${botConfig.selfId}:`, error)
+                logger.warn(`Failed to connect RCON for server ${serverConfig.selfId}:`, error)
                 if (this.debug) {
                   logger.info(`[DEBUG] RCON connection error details:`, (error as Error).message, (error as Error).stack)
                 }
               }
             })())
           } else {
-            logger.warn(`RCON not configured for bot ${botConfig.selfId} — server commands (executeRconCommand) will not be available`)
+            logger.warn(`RCON not configured for server ${serverConfig.selfId} — server commands (executeCommand) will not be available`)
             if (this.debug) {
-              if (botConfig.rcon) {
-                logger.info(`[DEBUG] RCON config incomplete for bot ${botConfig.selfId}, skipping (need host, port, password)`)
+              if (serverConfig.rcon) {
+                logger.info(`[DEBUG] RCON config incomplete for server ${serverConfig.selfId}, skipping (need host, port, password)`)
               } else {
-                logger.info(`[DEBUG] No RCON config for bot ${botConfig.selfId}`)
+                logger.info(`[DEBUG] No RCON config for server ${serverConfig.selfId}`)
               }
             }
           }
 
-          // WebSocket 连接（用于事件接收和消息发送）
-          if (botConfig.websocket) {
+          // WebSocket（用于事件接收和消息发送）
+          if (serverConfig.websocket) {
             connectTasks.push((async () => {
               if (this.debug) {
-                logger.info(`[DEBUG] Initializing WebSocket for bot ${botConfig.selfId}`)
+                logger.info(`[DEBUG] Initializing WebSocket for server ${serverConfig.selfId}`)
               }
-              await this.connectWebSocket(bot, botConfig.websocket!)
+              await this.connectWebSocket(bot, serverConfig.websocket)
             })())
           } else {
             if (this.debug) {
-              logger.info(`[DEBUG] No WebSocket config for bot ${botConfig.selfId}`)
+              logger.info(`[DEBUG] No WebSocket config for server ${serverConfig.selfId}`)
             }
           }
 
-          // 等待所有连接并行完成
           await Promise.allSettled(connectTasks)
         }
       })
@@ -391,7 +449,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     return `koishi_${Date.now()}_${++this.requestCounter}`
   }
 
-  private toTextComponent(message: any): MinecraftTextComponent[] {
+  private toTextComponent(message: any, chatImageEnabled: boolean, chatImageDefaultName: string): MinecraftTextComponent[] {
     const raw = this.extractRawText(message)
     if (!raw) return [{ text: '' }]
 
@@ -400,8 +458,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
     const fullText = segments.map(seg => {
       if (seg.type === 'image') {
-        if (this.chatImageEnabled) {
-          return this.buildCICode(seg.url, seg.name)
+        if (chatImageEnabled) {
+          return this.buildCICode(seg.url, seg.name, chatImageDefaultName)
         }
         return seg.url
       }
@@ -445,8 +503,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   /**
    * 生成 ChatImage CICode: [[CICode,url=<url>,name=<name>]]
    */
-  private buildCICode(url: string, name?: string): string {
-    const displayName = name || this.chatImageDefaultName
+  private buildCICode(url: string, name?: string, defaultName: string = '图片'): string {
+    const displayName = name || defaultName
     return `[[CICode,url=${url},name=${displayName}]]`
   }
 
@@ -578,7 +636,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     return states[state as keyof typeof states] || `UNKNOWN(${state})`
   }
 
-  private async connectWebSocket(bot: MinecraftBot<C>, wsConfig: NonNullable<MinecraftBotConfig['websocket']>) {
+  private async connectWebSocket(bot: MinecraftBot<C>, wsConfig: ServerConfig['websocket']) {
     const headers: Record<string, string> = {
       'x-self-name': bot.config.serverName || bot.selfId,
       ...(wsConfig.extraHeaders || {}),
@@ -1039,26 +1097,46 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   /**
    * 发送私聊消息 (send_private_msg)
    */
-  async sendPrivateMessage(player: string, message: string): Promise<void> {
+  async sendPrivateMessage(player: string, message: string, bot?: MinecraftBot<C>): Promise<void> {
     if (this.debug) {
       logger.info(`[DEBUG] Sending private message to player ${player}: ${message}`)
     }
 
-    const messageComponent = this.toTextComponent(message)
+    if (bot) {
+      const ws = this.wsConnections.get(bot.selfId)
+      if (ws?.readyState === WebSocket.OPEN) {
+        const messageComponent = this.toTextComponent(message, bot.chatImageEnabled, bot.chatImageDefaultName)
+        const response = await this.sendApiRequest(ws, 'send_private_msg', {
+          nickname: player,
+          message: messageComponent
+        })
+        if (this.debug) {
+          logger.info(`[DEBUG] Private message sent successfully via server ${bot.selfId}:`, response)
+        }
+        return
+      }
+      throw new Error(`No active WebSocket connection for server ${bot.selfId}`)
+    }
 
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
         try {
+          const targetBot = this.bots.find(b => b.selfId === botId)
+          const messageComponent = this.toTextComponent(
+            message,
+            targetBot?.chatImageEnabled ?? false,
+            targetBot?.chatImageDefaultName ?? '图片'
+          )
           const response = await this.sendApiRequest(ws, 'send_private_msg', {
             nickname: player,
             message: messageComponent
           })
           if (this.debug) {
-            logger.info(`[DEBUG] Private message sent successfully:`, response)
+            logger.info(`[DEBUG] Private message sent successfully via server ${botId}:`, response)
           }
           return
         } catch (error) {
-          logger.warn(`Failed to send private message via WebSocket for bot ${botId}:`, error)
+          logger.warn(`Failed to send private message via WebSocket for server ${botId}:`, error)
         }
       }
     }
@@ -1066,28 +1144,44 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     throw new Error('No available WebSocket connection to send private message')
   }
 
-  /**
-   * 广播消息 (broadcast)
-   */
-  async broadcast(message: string): Promise<void> {
+  async broadcast(message: string, bot?: MinecraftBot<C>): Promise<void> {
     if (this.debug) {
       logger.info(`[DEBUG] Broadcasting message: ${message}`)
     }
 
-    const messageComponent = this.toTextComponent(message)
+    if (bot) {
+      const ws = this.wsConnections.get(bot.selfId)
+      if (ws?.readyState === WebSocket.OPEN) {
+        const messageComponent = this.toTextComponent(message, bot.chatImageEnabled, bot.chatImageDefaultName)
+        const response = await this.sendApiRequest(ws, 'broadcast', {
+          message: messageComponent
+        })
+        if (this.debug) {
+          logger.info(`[DEBUG] Broadcast sent successfully via server ${bot.selfId}:`, response)
+        }
+        return
+      }
+      throw new Error(`No active WebSocket connection for server ${bot.selfId}`)
+    }
 
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
         try {
+          const targetBot = this.bots.find(b => b.selfId === botId)
+          const messageComponent = this.toTextComponent(
+            message,
+            targetBot?.chatImageEnabled ?? false,
+            targetBot?.chatImageDefaultName ?? '图片'
+          )
           const response = await this.sendApiRequest(ws, 'broadcast', {
             message: messageComponent
           })
           if (this.debug) {
-            logger.info(`[DEBUG] Broadcast sent successfully:`, response)
+            logger.info(`[DEBUG] Broadcast sent successfully via server ${botId}:`, response)
           }
           return
         } catch (error) {
-          logger.warn(`Failed to broadcast via WebSocket for bot ${botId}:`, error)
+          logger.warn(`Failed to broadcast via WebSocket for server ${botId}:`, error)
         }
       }
     }
@@ -1095,38 +1189,56 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     throw new Error('No available WebSocket connection to broadcast message')
   }
 
-  /**
-   * 执行 RCON 命令 (send_rcon_command)
-   */
-  async executeRconCommand(command: string): Promise<string> {
+  async executeRconCommand(command: string, bot?: MinecraftBot<C>): Promise<string> {
     if (this.debug) {
       logger.info(`[DEBUG] Executing RCON command: ${command}`)
+    }
+
+    if (bot) {
+      const rcon = this.rconConnections.get(bot.selfId)
+      if (rcon) {
+        if (this.debug) {
+          logger.info(`[DEBUG] Executing via RCON for server ${bot.selfId}: ${command}`)
+        }
+        return await rcon.send(command)
+      }
+      throw new Error(`RCON not available for server ${bot.selfId}: no active RCON connection`)
     }
 
     for (const [botId, rcon] of this.rconConnections) {
       try {
         if (this.debug) {
-          logger.info(`[DEBUG] Executing via RCON for bot ${botId}: ${command}`)
+          logger.info(`[DEBUG] Executing via RCON for server ${botId}: ${command}`)
         }
         return await rcon.send(command)
       } catch (error) {
-        logger.warn(`Failed to execute RCON command for bot ${botId}:`, error)
+        logger.warn(`Failed to execute RCON command for server ${botId}:`, error)
       }
     }
 
     throw new Error('RCON not available: no active RCON connection to execute command')
   }
 
-  /**
-   * 发送标题消息 (title)
-   */
   async sendTitle(
     title: string | MinecraftTextComponent,
     subtitle?: string | MinecraftTextComponent,
-    player?: string
+    player?: string,
+    bot?: MinecraftBot<C>
   ): Promise<void> {
     const titleComponent = typeof title === 'string' ? { text: title } : title
     const subtitleComponent = subtitle ? (typeof subtitle === 'string' ? { text: subtitle } : subtitle) : undefined
+
+    if (bot) {
+      const ws = this.wsConnections.get(bot.selfId)
+      if (ws?.readyState === WebSocket.OPEN) {
+        const data: any = { title: titleComponent }
+        if (subtitleComponent) data.subtitle = subtitleComponent
+        if (player) data.nickname = player
+        await this.sendApiRequest(ws, 'send_title', data)
+        return
+      }
+      throw new Error(`No active WebSocket connection for server ${bot.selfId}`)
+    }
 
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
@@ -1134,11 +1246,10 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
           const data: any = { title: titleComponent }
           if (subtitleComponent) data.subtitle = subtitleComponent
           if (player) data.nickname = player
-
           await this.sendApiRequest(ws, 'send_title', data)
           return
         } catch (error) {
-          logger.warn(`Failed to send title via WebSocket for bot ${botId}:`, error)
+          logger.warn(`Failed to send title via WebSocket for server ${botId}:`, error)
         }
       }
     }
@@ -1146,22 +1257,33 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     throw new Error('No available connection to send title')
   }
 
-  /**
-   * 发送动画栏消息 (action_bar)
-   */
-  async sendActionBar(message: string | MinecraftTextComponent, player?: string): Promise<void> {
+  async sendActionBar(
+    message: string | MinecraftTextComponent,
+    player?: string,
+    bot?: MinecraftBot<C>
+  ): Promise<void> {
     const messageComponent = typeof message === 'string' ? { text: message } : message
+
+    if (bot) {
+      const ws = this.wsConnections.get(bot.selfId)
+      if (ws?.readyState === WebSocket.OPEN) {
+        const data: any = { message: messageComponent }
+        if (player) data.nickname = player
+        await this.sendApiRequest(ws, 'send_actionbar', data)
+        return
+      }
+      throw new Error(`No active WebSocket connection for server ${bot.selfId}`)
+    }
 
     for (const [botId, ws] of this.wsConnections) {
       if (ws.readyState === WebSocket.OPEN) {
         try {
           const data: any = { message: messageComponent }
           if (player) data.nickname = player
-
           await this.sendApiRequest(ws, 'send_actionbar', data)
           return
         } catch (error) {
-          logger.warn(`Failed to send action bar via WebSocket for bot ${botId}:`, error)
+          logger.warn(`Failed to send action bar via WebSocket for server ${botId}:`, error)
         }
       }
     }
@@ -1174,7 +1296,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       logger.info(`[DEBUG] Stopping MinecraftAdapter`)
     }
 
-    // 清理所有待处理的请求
     for (const [echo, pending] of this.pendingRequests) {
       clearTimeout(pending.timeout)
       pending.reject(new Error('Adapter stopped'))
@@ -1185,7 +1306,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       try {
         ws.close()
       } catch (error) {
-        logger.warn(`Failed to close WebSocket for bot ${botId}:`, error)
+        logger.warn(`Failed to close WebSocket for server ${botId}:`, error)
       }
     }
     this.wsConnections.clear()
@@ -1194,7 +1315,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       try {
         rcon.end()
       } catch (error) {
-        logger.warn(`Failed to close RCON for bot ${botId}:`, error)
+        logger.warn(`Failed to close RCON for server ${botId}:`, error)
       }
     }
     this.rconConnections.clear()
@@ -1204,6 +1325,26 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 // ============================================================================
 // Koishi Schema 配置
 // ============================================================================
+
+const serverSchema = Schema.object({
+  selfId: Schema.string().description('机器人 ID（唯一标识）').required(),
+  serverName: Schema.string().description('服务器名称（需与鹊桥 config.yml 中的 server_name 一致）'),
+  websocket: Schema.object({
+    url: Schema.string().description('WebSocket 地址（如 ws://127.0.0.1:8080）').required(),
+    accessToken: Schema.string().description('访问令牌（需与鹊桥 config.yml 中的 access_token 一致）'),
+    extraHeaders: Schema.dict(Schema.string()).description('额外请求头'),
+  }).description('WebSocket 配置（用于事件接收和消息发送）').required(),
+  rcon: Schema.object({
+    host: Schema.string().description('RCON 主机地址').default('127.0.0.1'),
+    port: Schema.number().description('RCON 端口').default(25575),
+    password: Schema.string().description('RCON 密码').required(),
+    timeout: Schema.number().description('RCON 超时时间(ms)').default(5000),
+  }).description('RCON 配置（用于执行服务器命令，与 WebSocket 并行工作）'),
+  chatImage: Schema.object({
+    enabled: Schema.boolean().description('启用 ChatImage CICode 图片发送（需客户端安装 ChatImage Mod）').default(false),
+    defaultImageName: Schema.string().description('图片在聊天栏中的默认显示名称').default('图片'),
+  }).description('ChatImage 图片显示配置（仅对此服务器生效）'),
+})
 
 export namespace MinecraftAdapter {
   export const Config: Schema<MinecraftAdapterConfig> = Schema.object({
@@ -1216,25 +1357,7 @@ export namespace MinecraftAdapter {
     reconnectInterval: Schema.number().description('重连间隔时间(ms)').default(5000),
     maxReconnectAttempts: Schema.number().description('最大重连尝试次数').default(10),
     useMessagePrefix: Schema.boolean().description('是否在消息前添加默认前缀（由服务端配置）').default(false),
-    chatImage: Schema.object({
-      enabled: Schema.boolean().description('启用 ChatImage CICode 图片发送（需客户端安装 ChatImage Mod）').default(false),
-      defaultImageName: Schema.string().description('图片在聊天栏中的默认显示名称').default('图片'),
-    }).description('ChatImage 图片显示集成配置'),
-    bots: Schema.array(Schema.object({
-      selfId: Schema.string().description('机器人 ID（唯一标识）').required(),
-      serverName: Schema.string().description('服务器名称（需与鹊桥 config.yml 中的 server_name 一致）'),
-      rcon: Schema.object({
-        host: Schema.string().description('RCON 主机地址').default('127.0.0.1'),
-        port: Schema.number().description('RCON 端口').default(25575),
-        password: Schema.string().description('RCON 密码').required(),
-        timeout: Schema.number().description('RCON 超时时间(ms)').default(5000),
-      }).description('RCON 配置（用于执行服务器命令）'),
-      websocket: Schema.object({
-        url: Schema.string().description('WebSocket 地址（如 ws://127.0.0.1:8080）').required(),
-        accessToken: Schema.string().description('访问令牌（需与鹊桥 config.yml 中的 access_token 一致）'),
-        extraHeaders: Schema.dict(Schema.string()).description('额外请求头'),
-      }).description('WebSocket 配置'),
-    })).description('机器人配置列表').default([]),
+    servers: Schema.array(serverSchema).description('服务器配置列表（每个服务器对应一个独立的 bot 实例）').default([]),
   })
 }
 
