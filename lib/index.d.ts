@@ -146,16 +146,7 @@ export interface QueqiaoApiResponse<T = any> {
     echo?: string | number;
 }
 /**
- * ChatImage 集成配置
- */
-export interface ChatImageConfig {
-    /** 是否启用 ChatImage CICode 生成（出站方向），默认关闭 */
-    enabled?: boolean;
-    /** 图片在聊天栏中的默认显示名称 */
-    defaultImageName?: string;
-}
-/**
- * 单个服务器的配置
+ * 单个服务器的配置（扁平化结构）
  * 每个服务器对应一个独立的 bot 实例
  */
 export interface ServerConfig {
@@ -163,24 +154,26 @@ export interface ServerConfig {
     selfId: string;
     /** 服务器名称（需与鹊桥 config.yml 中的 server_name 一致） */
     serverName?: string;
-    /** WebSocket 配置（用于事件接收和消息发送） */
-    websocket: {
-        /** WebSocket 地址（如 ws://127.0.0.1:8080） */
-        url: string;
-        /** 访问令牌（需与鹊桥 config.yml 中的 access_token 一致） */
-        accessToken?: string;
-        /** 额外请求头 */
-        extraHeaders?: Record<string, string>;
-    };
-    /** RCON 配置（用于执行服务器命令，与 WebSocket 并行工作） */
-    rcon?: {
-        host: string;
-        port: number;
-        password: string;
-        timeout?: number;
-    };
-    /** ChatImage 图片显示配置（仅对此服务器生效） */
-    chatImage?: ChatImageConfig;
+    /** WebSocket 地址（如 ws://127.0.0.1:8080） */
+    url: string;
+    /** 访问令牌（需与鹊桥 config.yml 中的 access_token 一致） */
+    accessToken?: string;
+    /** 额外请求头 */
+    extraHeaders?: Record<string, string>;
+    /** 启用 RCON 远程命令执行 */
+    enableRcon?: boolean;
+    /** RCON 主机地址 */
+    rconHost?: string;
+    /** RCON 端口 */
+    rconPort?: number;
+    /** RCON 密码 */
+    rconPassword?: string;
+    /** RCON 超时时间(ms) */
+    rconTimeout?: number;
+    /** 启用 ChatImage CICode 图片发送（需客户端安装 ChatImage Mod） */
+    enableChatImage?: boolean;
+    /** 图片在聊天栏中的默认显示名称 */
+    chatImageDefaultName?: string;
 }
 /** @deprecated 请使用 ServerConfig */
 export type MinecraftBotConfig = ServerConfig;
