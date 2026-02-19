@@ -207,9 +207,10 @@ export interface ServerConfig {
   }
   /** RCON 配置（用于执行服务器命令，与 WebSocket 并行工作） */
   rcon?: {
-    host: string
-    port: number
-    password: string
+    enabled?: boolean
+    host?: string
+    port?: number
+    password?: string
     timeout?: number
   }
   /** ChatImage 图片显示配置（仅对此服务器生效） */
@@ -385,17 +386,19 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
           const connectTasks: Promise<void>[] = []
 
           // RCON（用于执行服务器命令，与 WebSocket 并行工作）
-          if (serverConfig.rcon && serverConfig.rcon.host && serverConfig.rcon.port && serverConfig.rcon.password) {
+          if (serverConfig.rcon?.enabled) {
             connectTasks.push((async () => {
               try {
+                const rconHost = serverConfig.rcon!.host || '127.0.0.1'
+                const rconPort = serverConfig.rcon!.port || 25575
                 if (this.debug) {
-                  logger.info(`[DEBUG] Connecting RCON for server ${serverConfig.selfId} to ${serverConfig.rcon!.host}:${serverConfig.rcon!.port}`)
+                  logger.info(`[DEBUG] Connecting RCON for server ${serverConfig.selfId} to ${rconHost}:${rconPort}`)
                 }
 
                 const rcon = await Rcon.connect({
-                  host: serverConfig.rcon!.host,
-                  port: serverConfig.rcon!.port,
-                  password: serverConfig.rcon!.password,
+                  host: rconHost,
+                  port: rconPort,
+                  password: serverConfig.rcon!.password || '',
                   timeout: serverConfig.rcon!.timeout || 5000,
                 })
                 this.rconConnections.set(serverConfig.selfId, rcon)
@@ -409,13 +412,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
               }
             })())
           } else {
-            logger.warn(`RCON not configured for server ${serverConfig.selfId} — server commands (executeCommand) will not be available`)
             if (this.debug) {
-              if (serverConfig.rcon) {
-                logger.info(`[DEBUG] RCON config incomplete for server ${serverConfig.selfId}, skipping (need host, port, password)`)
-              } else {
-                logger.info(`[DEBUG] No RCON config for server ${serverConfig.selfId}`)
-              }
+              logger.info(`[DEBUG] RCON not enabled for server ${serverConfig.selfId}`)
             }
           }
 
@@ -1334,16 +1332,33 @@ const serverSchema = Schema.object({
     accessToken: Schema.string().description('访问令牌（需与鹊桥 config.yml 中的 access_token 一致）'),
     extraHeaders: Schema.dict(Schema.string()).description('额外请求头'),
   }).description('WebSocket 配置（用于事件接收和消息发送）').required(),
-  rcon: Schema.object({
-    host: Schema.string().description('RCON 主机地址').default('127.0.0.1'),
-    port: Schema.number().description('RCON 端口').default(25575),
-    password: Schema.string().description('RCON 密码').required(),
-    timeout: Schema.number().description('RCON 超时时间(ms)').default(5000),
-  }).description('RCON 配置（用于执行服务器命令，与 WebSocket 并行工作）'),
-  chatImage: Schema.object({
-    enabled: Schema.boolean().description('启用 ChatImage CICode 图片发送（需客户端安装 ChatImage Mod）').default(false),
-    defaultImageName: Schema.string().description('图片在聊天栏中的默认显示名称').default('图片'),
-  }).description('ChatImage 图片显示配置（仅对此服务器生效）'),
+  rcon: Schema.intersect([
+    Schema.object({
+      enabled: Schema.boolean().description('启用 RCON 远程命令执行').default(false),
+    }),
+    Schema.union([
+      Schema.object({
+        enabled: Schema.const(true).required(),
+        host: Schema.string().description('RCON 主机地址').default('127.0.0.1'),
+        port: Schema.number().description('RCON 端口').default(25575),
+        password: Schema.string().description('RCON 密码（留空表示无密码）'),
+        timeout: Schema.number().description('RCON 超时时间(ms)').default(5000),
+      }),
+      Schema.object({}),
+    ]),
+  ]).description('RCON 配置（用于执行服务器命令，与 WebSocket 并行工作）'),
+  chatImage: Schema.intersect([
+    Schema.object({
+      enabled: Schema.boolean().description('启用 ChatImage CICode 图片发送（需客户端安装 ChatImage Mod）').default(false),
+    }),
+    Schema.union([
+      Schema.object({
+        enabled: Schema.const(true).required(),
+        defaultImageName: Schema.string().description('图片在聊天栏中的默认显示名称').default('图片'),
+      }),
+      Schema.object({}),
+    ]),
+  ]).description('ChatImage 图片显示配置（仅对此服务器生效）'),
 })
 
 export namespace MinecraftAdapter {
