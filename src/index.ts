@@ -371,6 +371,9 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   private pendingRequests = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: NodeJS.Timeout }>()
   private requestCounter = 0
 
+  /** 事件去重缓存：防止鹊桥服务端对同一事件发送多次 */
+  private recentEventKeys = new Map<string, number>()
+
   private debug: boolean
   private detailedLogging: boolean
   private tokenizeMode: 'split' | 'none'
@@ -389,6 +392,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       this.reconnectInterval = config.reconnectInterval ?? 5000
       this.maxReconnectAttempts = config.maxReconnectAttempts ?? 10
       this.useMessagePrefix = config.useMessagePrefix ?? false
+
+      this.startDedupCleanup()
 
       if (this.debug) {
         logger.info(`[DEBUG] MinecraftAdapter initialized with config:`, {
@@ -468,6 +473,40 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       logger.error('MinecraftAdapter initialization failed:', err)
       throw err
     }
+  }
+
+  private static readonly DEDUP_WINDOW_MS = 2000
+  private static readonly DEDUP_CLEANUP_INTERVAL_MS = 10000
+
+  private isDuplicateEvent(payload: QueqiaoEvent): boolean {
+    if (payload.post_type !== 'notice') return false
+
+    const player = (payload as any).player
+    const key = `${payload.event_name}:${player?.uuid || player?.nickname || ''}:${payload.server_name}`
+    const now = Date.now()
+    const lastSeen = this.recentEventKeys.get(key)
+
+    if (lastSeen && now - lastSeen < MinecraftAdapter.DEDUP_WINDOW_MS) {
+      if (this.debug) {
+        logger.info(`[DEBUG] Duplicate event suppressed: ${key}`)
+      }
+      return true
+    }
+
+    this.recentEventKeys.set(key, now)
+    return false
+  }
+
+  private startDedupCleanup() {
+    const interval = setInterval(() => {
+      const now = Date.now()
+      for (const [key, ts] of this.recentEventKeys) {
+        if (now - ts > MinecraftAdapter.DEDUP_WINDOW_MS * 2) {
+          this.recentEventKeys.delete(key)
+        }
+      }
+    }, MinecraftAdapter.DEDUP_CLEANUP_INTERVAL_MS)
+    this.ctx.on('dispose', () => clearInterval(interval))
   }
 
   /**
@@ -724,6 +763,9 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
         // 处理事件
         const event = obj as QueqiaoEvent
+
+        if (this.isDuplicateEvent(event)) return
+
         const session = this.createSession(bot, event)
         if (session) {
           if (this.debug) {

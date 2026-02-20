@@ -221,6 +221,8 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private reconnectAttempts;
     private pendingRequests;
     private requestCounter;
+    /** 事件去重缓存：防止鹊桥服务端对同一事件发送多次 */
+    private recentEventKeys;
     private debug;
     private detailedLogging;
     private tokenizeMode;
@@ -228,6 +230,10 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private maxReconnectAttempts;
     private useMessagePrefix;
     constructor(ctx: C, rawConfig: MinecraftAdapterConfig);
+    private static readonly DEDUP_WINDOW_MS;
+    private static readonly DEDUP_CLEANUP_INTERVAL_MS;
+    private isDuplicateEvent;
+    private startDedupCleanup;
     /**
      * 生成唯一的请求 ID
      */
