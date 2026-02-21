@@ -362,7 +362,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   constructor(ctx: C, rawConfig: MinecraftAdapterConfig) {
     super(ctx)
     try {
-      const config = migrateConfig(rawConfig)
+      const resolvedConfig = MinecraftAdapter.Config(rawConfig) as MinecraftAdapterConfig
+      const config = migrateConfig(resolvedConfig)
 
       this.debug = config.debug ?? false
       this.detailedLogging = config.detailedLogging ?? false
@@ -389,7 +390,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
         for (const serverConfig of config.servers) {
           if (this.debug) {
-            logger.info(`[DEBUG] Initializing server ${serverConfig.selfId}`)
+            logger.info(`[DEBUG] Initializing server ${serverConfig.selfId}, full config:`, JSON.stringify(serverConfig))
           }
 
           const bot = new MinecraftBot(ctx, serverConfig)
@@ -668,6 +669,14 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     const rconTimeout = config.rconTimeout || 5000
 
     if (this.debug) {
+      logger.info(`[DEBUG] RCON config for server ${selfId}:`, {
+        rconHost: config.rconHost,
+        rconPort: config.rconPort,
+        rconPassword: config.rconPassword ? '***' : undefined,
+        rconTimeout: config.rconTimeout,
+        enableRcon: config.enableRcon,
+        configKeys: Object.keys(config),
+      })
       logger.info(`[DEBUG] Connecting RCON for server ${selfId} to ${rconHost}:${rconPort}`)
     }
 
