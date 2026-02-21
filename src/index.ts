@@ -243,18 +243,21 @@ export interface MinecraftAdapterConfig {
  */
 function flattenServerConfig(server: any): ServerConfig {
   if (server.websocket && typeof server.websocket === 'object') {
+    // 嵌套格式的 rcon 对象：只要存在且有 host/port/password 任一字段，即视为启用
+    const hasRcon = server.rcon && typeof server.rcon === 'object'
+      && (server.rcon.host || server.rcon.port || server.rcon.password)
     return {
       selfId: server.selfId,
       serverName: server.serverName,
       url: server.websocket.url,
       accessToken: server.websocket.accessToken,
       extraHeaders: server.websocket.extraHeaders,
-      enableRcon: server.rcon?.enabled,
+      enableRcon: hasRcon ? true : (server.rcon?.enabled ?? false),
       rconHost: server.rcon?.host,
       rconPort: server.rcon?.port,
       rconPassword: server.rcon?.password,
       rconTimeout: server.rcon?.timeout,
-      enableChatImage: server.chatImage?.enabled,
+      enableChatImage: server.chatImage?.enabled ?? !!(server.chatImage && (server.chatImage.defaultImageName)),
       chatImageDefaultName: server.chatImage?.defaultImageName,
     }
   }
@@ -366,6 +369,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   static reusable = true
 
   private rconConnections = new Map<string, Rcon>()
+  private rconReconnectAttempts = new Map<string, number>()
+  private rconConfigs = new Map<string, ServerConfig>()
   private wsConnections = new Map<string, WebSocket>()
   private reconnectAttempts = new Map<string, number>()
   private pendingRequests = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: NodeJS.Timeout }>()
@@ -422,30 +427,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
           // RCON（用于执行服务器命令，与 WebSocket 并行工作）
           if (serverConfig.enableRcon) {
-            connectTasks.push((async () => {
-              try {
-                const rconHost = serverConfig.rconHost || '127.0.0.1'
-                const rconPort = serverConfig.rconPort || 25575
-                if (this.debug) {
-                  logger.info(`[DEBUG] Connecting RCON for server ${serverConfig.selfId} to ${rconHost}:${rconPort}`)
-                }
-
-                const rcon = await Rcon.connect({
-                  host: rconHost,
-                  port: rconPort,
-                  password: serverConfig.rconPassword || '',
-                  timeout: serverConfig.rconTimeout || 5000,
-                })
-                this.rconConnections.set(serverConfig.selfId, rcon)
-                bot.rcon = rcon
-                logger.info(`RCON connected for server ${serverConfig.selfId} — ready for command execution`)
-              } catch (error) {
-                logger.warn(`Failed to connect RCON for server ${serverConfig.selfId}:`, error)
-                if (this.debug) {
-                  logger.info(`[DEBUG] RCON connection error details:`, (error as Error).message, (error as Error).stack)
-                }
-              }
-            })())
+            this.rconConfigs.set(serverConfig.selfId, serverConfig)
+            connectTasks.push(this.connectRcon(bot))
           } else {
             if (this.debug) {
               logger.info(`[DEBUG] RCON not enabled for server ${serverConfig.selfId}`)
@@ -701,6 +684,80 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       3: 'CLOSED'
     }
     return states[state as keyof typeof states] || `UNKNOWN(${state})`
+  }
+
+  private async connectRcon(bot: MinecraftBot<C>): Promise<void> {
+    const config = bot.config
+    const selfId = bot.selfId
+    const rconHost = config.rconHost || '127.0.0.1'
+    const rconPort = config.rconPort || 25575
+    const rconTimeout = config.rconTimeout || 5000
+
+    if (this.debug) {
+      logger.info(`[DEBUG] Connecting RCON for server ${selfId} to ${rconHost}:${rconPort}`)
+    }
+
+    try {
+      const rcon = await this.createRconWithTimeout(rconHost, rconPort, config.rconPassword || '', rconTimeout)
+      this.rconConnections.set(selfId, rcon)
+      bot.rcon = rcon
+      this.rconReconnectAttempts.set(selfId, 0)
+      logger.info(`RCON connected for server ${selfId} — ready for command execution`)
+
+      rcon.on('end', () => {
+        logger.warn(`RCON connection lost for server ${selfId}`)
+        this.rconConnections.delete(selfId)
+        bot.rcon = undefined
+        this.scheduleRconReconnect(bot)
+      })
+
+      rcon.on('error', (error: Error) => {
+        logger.warn(`RCON error for server ${selfId}:`, error.message)
+      })
+    } catch (error) {
+      logger.warn(`Failed to connect RCON for server ${selfId}:`, error)
+      if (this.debug) {
+        logger.info(`[DEBUG] RCON connection error details:`, (error as Error).message, (error as Error).stack)
+      }
+      this.scheduleRconReconnect(bot)
+    }
+  }
+
+  private createRconWithTimeout(host: string, port: number, password: string, timeout: number): Promise<Rcon> {
+    return new Promise<Rcon>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`RCON TCP connection timeout after ${timeout}ms to ${host}:${port}`))
+      }, timeout)
+
+      Rcon.connect({ host, port, password, timeout }).then(
+        (rcon) => { clearTimeout(timer); resolve(rcon) },
+        (err) => { clearTimeout(timer); reject(err) },
+      )
+    })
+  }
+
+  private scheduleRconReconnect(bot: MinecraftBot<C>) {
+    const selfId = bot.selfId
+    if (!this.rconConfigs.has(selfId)) return
+
+    const attempts = this.rconReconnectAttempts.get(selfId) || 0
+    if (attempts >= this.maxReconnectAttempts) {
+      logger.error(`RCON max reconnect attempts (${this.maxReconnectAttempts}) reached for server ${selfId}`)
+      return
+    }
+
+    this.rconReconnectAttempts.set(selfId, attempts + 1)
+    const delay = this.reconnectInterval * Math.pow(2, Math.min(attempts, 5))
+
+    if (this.debug) {
+      logger.info(`[DEBUG] RCON reconnect for server ${selfId} in ${delay}ms (attempt ${attempts + 1}/${this.maxReconnectAttempts})`)
+    }
+
+    setTimeout(() => {
+      if (!this.rconConfigs.has(selfId)) return
+      if (this.rconConnections.has(selfId)) return
+      this.connectRcon(bot)
+    }, delay)
   }
 
   private async connectWebSocket(bot: MinecraftBot<C>) {
@@ -1382,6 +1439,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     }
     this.wsConnections.clear()
 
+    this.rconConfigs.clear()
     for (const [botId, rcon] of this.rconConnections) {
       try {
         rcon.end()

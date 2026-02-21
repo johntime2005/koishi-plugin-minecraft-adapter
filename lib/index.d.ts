@@ -217,6 +217,8 @@ export declare class MinecraftBot<C extends Context = Context> extends Bot<C, Se
 export declare class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
     static reusable: boolean;
     private rconConnections;
+    private rconReconnectAttempts;
+    private rconConfigs;
     private wsConnections;
     private reconnectAttempts;
     private pendingRequests;
@@ -260,6 +262,9 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private handleApiResponse;
     private getWebSocketCloseCode;
     private getWebSocketStateString;
+    private connectRcon;
+    private createRconWithTimeout;
+    private scheduleRconReconnect;
     private connectWebSocket;
     private sessionCounter;
     /**
