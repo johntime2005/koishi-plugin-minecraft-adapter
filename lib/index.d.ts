@@ -217,6 +217,8 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private requestCounter;
     /** 事件去重缓存：防止鹊桥服务端对同一事件发送多次 */
     private recentEventKeys;
+    private disposed;
+    private reconnectTimers;
     private debug;
     private detailedLogging;
     private tokenizeMode;

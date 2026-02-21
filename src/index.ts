@@ -352,6 +352,9 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   /** 事件去重缓存：防止鹊桥服务端对同一事件发送多次 */
   private recentEventKeys = new Map<string, number>()
 
+  private disposed = false
+  private reconnectTimers = new Set<ReturnType<typeof setTimeout>>()
+
   private debug: boolean
   private detailedLogging: boolean
   private tokenizeMode: 'split' | 'none'
@@ -722,6 +725,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   private scheduleRconReconnect(bot: MinecraftBot<C>) {
     const selfId = bot.selfId
     if (!this.rconConfigs.has(selfId)) return
+    if (this.disposed) return
 
     const attempts = this.rconReconnectAttempts.get(selfId) || 0
     if (attempts >= this.maxReconnectAttempts) {
@@ -736,11 +740,14 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       logger.info(`[DEBUG] RCON reconnect for server ${selfId} in ${delay}ms (attempt ${attempts + 1}/${this.maxReconnectAttempts})`)
     }
 
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(timer)
+      if (this.disposed) return
       if (!this.rconConfigs.has(selfId)) return
       if (this.rconConnections.has(selfId)) return
       this.connectRcon(bot)
     }, delay)
+    this.reconnectTimers.add(timer)
   }
 
   private async connectWebSocket(bot: MinecraftBot<C>) {
@@ -861,18 +868,23 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       }
       bot.offline()
 
+      if (this.disposed) return
+
       const attempts = this.reconnectAttempts.get(bot.selfId) || 0
       if (attempts < this.maxReconnectAttempts) {
         this.reconnectAttempts.set(bot.selfId, attempts + 1)
-        const delay = this.reconnectInterval * Math.pow(2, attempts) // 指数退避
+        const delay = this.reconnectInterval * Math.pow(2, attempts)
         if (this.debug) {
           logger.info(`[DEBUG] Attempting to reconnect WebSocket for bot ${bot.selfId} in ${delay}ms (attempt ${attempts + 1}/${this.maxReconnectAttempts})`)
         }
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          this.reconnectTimers.delete(timer)
+          if (this.disposed) return
           if (this.wsConnections.get(bot.selfId)?.readyState !== WebSocket.OPEN) {
             this.connectWebSocket(bot)
           }
         }, delay)
+        this.reconnectTimers.add(timer)
       } else {
         logger.error(`Max reconnect attempts reached for bot ${bot.selfId}`)
       }
@@ -1406,6 +1418,13 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     if (this.debug) {
       logger.info(`[DEBUG] Stopping MinecraftAdapter`)
     }
+
+    this.disposed = true
+
+    for (const timer of this.reconnectTimers) {
+      clearTimeout(timer)
+    }
+    this.reconnectTimers.clear()
 
     for (const [echo, pending] of this.pendingRequests) {
       clearTimeout(pending.timeout)
