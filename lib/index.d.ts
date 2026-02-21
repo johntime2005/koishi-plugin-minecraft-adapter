@@ -196,22 +196,13 @@ export interface MinecraftAdapterConfig {
 export declare class MinecraftBot<C extends Context = Context> extends Bot<C, ServerConfig> {
     rcon?: Rcon;
     ws?: WebSocket;
-    /** 此服务器是否启用 ChatImage CICode */
     chatImageEnabled: boolean;
-    /** 此服务器的 ChatImage 默认图片名称 */
     chatImageDefaultName: string;
     constructor(ctx: C, config: ServerConfig);
-    /**
-     * 发送消息到频道或私聊
-     */
-    sendMessage(channelId: string, content: string): Promise<string[]>;
-    /**
-     * 发送私聊消息
-     */
-    sendPrivateMessage(userId: string, content: string): Promise<string[]>;
-    /**
-     * 执行 RCON 命令（用于执行服务器命令，与 WebSocket 并行工作）
-     */
+    createDirectChannel(userId: string): Promise<{
+        id: string;
+        type: 1;
+    }>;
     executeCommand(command: string): Promise<string>;
 }
 export declare class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
@@ -219,7 +210,8 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private rconConnections;
     private rconReconnectAttempts;
     private rconConfigs;
-    private wsConnections;
+    /** @internal 供 MessageEncoder 访问 */
+    wsConnections: Map<string, WebSocket>;
     private reconnectAttempts;
     private pendingRequests;
     private requestCounter;
@@ -254,8 +246,9 @@ export declare class MinecraftAdapter<C extends Context = Context> extends Adapt
     private decodeHtmlEntities;
     /**
      * 发送 WebSocket API 请求并等待响应
+     * @internal 供 MessageEncoder 访问
      */
-    private sendApiRequest;
+    sendApiRequest<T = any>(ws: WebSocket, api: string, data: any, timeout?: number): Promise<QueqiaoApiResponse<T>>;
     /**
      * 处理 API 响应
      */

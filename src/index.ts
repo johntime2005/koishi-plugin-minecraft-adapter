@@ -1,4 +1,4 @@
-import { Adapter, Bot, Context, Logger, Schema, Session } from 'koishi'
+import { Adapter, Bot, Context, h, Logger, MessageEncoder, Schema, Session } from 'koishi'
 import { Rcon } from 'rcon-client'
 import WebSocket from 'ws'
 
@@ -309,9 +309,7 @@ function migrateConfig(raw: any): MinecraftAdapterConfig {
 export class MinecraftBot<C extends Context = Context> extends Bot<C, ServerConfig> {
   public rcon?: Rcon
   public ws?: WebSocket
-  /** 此服务器是否启用 ChatImage CICode */
   public chatImageEnabled: boolean
-  /** 此服务器的 ChatImage 默认图片名称 */
   public chatImageDefaultName: string
 
   constructor(ctx: C, config: ServerConfig) {
@@ -322,36 +320,10 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, ServerConf
     this.chatImageDefaultName = config.chatImageDefaultName ?? '图片'
   }
 
-  /**
-   * 发送消息到频道或私聊
-   */
-  async sendMessage(channelId: string, content: string): Promise<string[]> {
-    if (channelId.startsWith('private:')) {
-      const player = channelId.slice(8)
-      return await this.sendPrivateMessage(player, content)
-    } else {
-      if (this.adapter instanceof MinecraftAdapter) {
-        await this.adapter.broadcast(content, this)
-        return []
-      }
-      return []
-    }
+  async createDirectChannel(userId: string) {
+    return { id: `private:${userId}`, type: 1 as const }
   }
 
-  /**
-   * 发送私聊消息
-   */
-  async sendPrivateMessage(userId: string, content: string): Promise<string[]> {
-    if (this.adapter instanceof MinecraftAdapter) {
-      await this.adapter.sendPrivateMessage(userId, content, this)
-      return []
-    }
-    return []
-  }
-
-  /**
-   * 执行 RCON 命令（用于执行服务器命令，与 WebSocket 并行工作）
-   */
   async executeCommand(command: string): Promise<string> {
     if (this.adapter instanceof MinecraftAdapter) {
       return await this.adapter.executeRconCommand(command, this)
@@ -371,7 +343,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   private rconConnections = new Map<string, Rcon>()
   private rconReconnectAttempts = new Map<string, number>()
   private rconConfigs = new Map<string, ServerConfig>()
-  private wsConnections = new Map<string, WebSocket>()
+  /** @internal 供 MessageEncoder 访问 */
+  wsConnections = new Map<string, WebSocket>()
   private reconnectAttempts = new Map<string, number>()
   private pendingRequests = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: NodeJS.Timeout }>()
   private requestCounter = 0
@@ -611,8 +584,9 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
   /**
    * 发送 WebSocket API 请求并等待响应
+   * @internal 供 MessageEncoder 访问
    */
-  private async sendApiRequest<T = any>(
+  async sendApiRequest<T = any>(
     ws: WebSocket,
     api: string,
     data: any,
@@ -1450,6 +1424,96 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     this.rconConnections.clear()
   }
 }
+
+// ============================================================================
+// MessageEncoder 实现 — 让 Koishi 框架正确管理消息生命周期
+// ============================================================================
+
+class MinecraftMessageEncoder<C extends Context = Context> extends MessageEncoder<C, MinecraftBot<C>> {
+  private buffer = ''
+
+  async flush(): Promise<void> {
+    if (!this.buffer) return
+
+    const text = this.buffer
+    this.buffer = ''
+
+    const adapter = this.bot.adapter as MinecraftAdapter<C>
+    const ws = adapter.wsConnections.get(this.bot.selfId)
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error(`No active WebSocket connection for server ${this.bot.selfId}`)
+    }
+
+    const messageComponent: MinecraftTextComponent[] = [{ text }]
+
+    const isPrivate = this.channelId.startsWith('private:')
+    if (isPrivate) {
+      const player = this.channelId.slice(8)
+      const response = await adapter.sendApiRequest(ws, 'send_private_msg', {
+        nickname: player,
+        message: messageComponent,
+      })
+      const msgId = String(response.echo ?? Date.now())
+      this.results.push({ id: msgId, content: text })
+    } else {
+      const response = await adapter.sendApiRequest(ws, 'broadcast', {
+        message: messageComponent,
+      })
+      const msgId = String(response.echo ?? Date.now())
+      this.results.push({ id: msgId, content: text })
+    }
+  }
+
+  async visit(element: h): Promise<void> {
+    const { type, attrs, children } = element
+    switch (type) {
+      case 'text':
+        this.buffer += attrs.content ?? ''
+        break
+      case 'at':
+        if (attrs.name) {
+          this.buffer += `@${attrs.name}`
+        } else if (attrs.id) {
+          this.buffer += `@${attrs.id}`
+        }
+        break
+      case 'br':
+        this.buffer += '\n'
+        break
+      case 'p':
+        if (this.buffer && !this.buffer.endsWith('\n')) this.buffer += '\n'
+        await this.render(children)
+        if (!this.buffer.endsWith('\n')) this.buffer += '\n'
+        break
+      case 'img':
+      case 'image':
+      case 'audio':
+      case 'video':
+      case 'file': {
+        const url = attrs.src ?? attrs.url ?? ''
+        if (url) {
+          if (this.bot.chatImageEnabled && (type === 'img' || type === 'image')) {
+            const name = attrs.alt ?? attrs.name ?? attrs.summary ?? this.bot.chatImageDefaultName
+            this.buffer += `[[CICode,url=${url},name=${name}]]`
+          } else {
+            this.buffer += url
+          }
+        }
+        break
+      }
+      case 'message':
+        await this.flush()
+        await this.render(children)
+        await this.flush()
+        break
+      default:
+        await this.render(children)
+        break
+    }
+  }
+}
+
+MinecraftBot.MessageEncoder = MinecraftMessageEncoder as any
 
 // ============================================================================
 // Koishi Schema 配置
