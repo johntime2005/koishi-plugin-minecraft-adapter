@@ -22,7 +22,6 @@
     "koishi": "^4.17.9"
   },
   "dependencies": {
-    "rcon-client": "^4.2.5",
     "ws": "^8.18.0"
   },
   "devDependencies": {
