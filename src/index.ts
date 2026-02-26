@@ -1,5 +1,5 @@
 import { Adapter, Bot, Context, h, Logger, MessageEncoder, Schema, Session } from 'koishi'
-import { Rcon } from 'rcon-client'
+import { Rcon } from './rcon'
 import WebSocket from 'ws'
 
 const logger = new Logger('minecraft')
@@ -707,7 +707,7 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     }
 
     try {
-      const rcon = await this.createRconWithTimeout(rconHost, rconPort, config.rconPassword || '', rconTimeout)
+      const rcon = await this.createRconWithTimeout(rconHost, rconPort, String(config.rconPassword ?? ''), rconTimeout)
       this.rconConnections.set(selfId, rcon)
       bot.rcon = rcon
       this.rconReconnectAttempts.set(selfId, 0)

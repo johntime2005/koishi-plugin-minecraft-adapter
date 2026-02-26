@@ -1,5 +1,5 @@
 import { Adapter, Bot, Context, Schema } from 'koishi';
-import { Rcon } from 'rcon-client';
+import { Rcon } from './rcon';
 import WebSocket from 'ws';
 /**
  * Minecraft 文本组件格式
