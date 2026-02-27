@@ -683,7 +683,8 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   }
 
   private async connectRcon(bot: MinecraftBot<C>): Promise<void> {
-    const config = bot.config
+    // 优先使用 rconConfigs（经 migrateConfig 扁平化后的可靠配置），回退到 bot.config
+    const config = this.rconConfigs.get(bot.selfId) ?? bot.config
     const selfId = bot.selfId
     // rconHost 未配置时，从 WebSocket URL 中提取主机地址作为回退
     let rconHost = config.rconHost
@@ -708,9 +709,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
 
     try {
       const rconPassword = String(config.rconPassword ?? '')
-      if (this.debug) {
-        logger.info(`[DEBUG] RCON password detail: type=${typeof config.rconPassword}, length=${rconPassword.length}, value=${JSON.stringify(rconPassword)}`)
-      }
       const rcon = await this.createRconWithTimeout(rconHost, rconPort, rconPassword, rconTimeout)
       this.rconConnections.set(selfId, rcon)
       bot.rcon = rcon
@@ -1578,7 +1576,7 @@ MinecraftBot.MessageEncoder = MinecraftMessageEncoder as any
 const serverSchema = Schema.object({
   selfId: Schema.string().description('机器人 ID（唯一标识）').required(),
   serverName: Schema.string().description('服务器名称（需与鹊桥 config.yml 中的 server_name 一致）'),
-  url: Schema.string().description('WebSocket 地址（如 ws://127.0.0.1:8080）').required(),
+  url: Schema.string().description('WebSocket 地址（如 ws://127.0.0.1:8080）'),
   accessToken: Schema.string().description('访问令牌（需与鹊桥 config.yml 中的 access_token 一致）'),
   extraHeaders: Schema.dict(Schema.string()).description('额外请求头'),
   enableRcon: Schema.boolean().description('启用 RCON 远程命令执行').default(false),
@@ -1588,6 +1586,10 @@ const serverSchema = Schema.object({
   rconTimeout: Schema.number().description('RCON 超时时间(ms)').default(5000),
   enableChatImage: Schema.boolean().description('启用 ChatImage CICode 图片发送（需客户端安装 ChatImage Mod）').default(false),
   chatImageDefaultName: Schema.string().description('图片在聊天栏中的默认显示名称').default('图片'),
+  // 接受嵌套配置格式（README 文档中推荐的格式），由 flattenServerConfig 扁平化
+  websocket: Schema.any().hidden(),
+  rcon: Schema.any().hidden(),
+  chatImage: Schema.any().hidden(),
 })
 
 export namespace MinecraftAdapter {

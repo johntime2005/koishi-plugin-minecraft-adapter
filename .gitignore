@@ -8,3 +8,5 @@ dist/
 .env.local
 .env.*.local
 .spec-workflow/
+*.tgz
+.serena/

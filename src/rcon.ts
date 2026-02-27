@@ -145,9 +145,6 @@ export class Rcon {
 
       // Auth packet: type = 3 (SERVERDATA_AUTH)
       const authPkt = this.encode(authId, 3, this.password)
-      if (this.debug) {
-        console.log(`[RCON DEBUG] Sending auth packet: authId=${authId}, password=${JSON.stringify(this.password)}, password.length=${this.password.length}, hex=${authPkt.toString('hex')}`)
-      }
       socket.write(authPkt)
     })
   }
@@ -217,9 +214,6 @@ export class Rcon {
       const bodyEnd = Math.max(12, total - 2)
       const body = raw.subarray(12, bodyEnd).toString('utf-8').replace(/\0+$/, '')
 
-      if (this.debug && !this.authenticated) {
-        console.log(`[RCON DEBUG] Raw packet: size=${size}, total=${total}, hex=${raw.toString('hex')}`)
-      }
 
       this.onPacket(id, type, body)
     }
@@ -240,9 +234,6 @@ export class Rcon {
    */
   private onPacket(id: number, type: number, body: string): void {
     if (!this.authenticated && this.authCb) {
-      if (this.debug) {
-        console.log(`[RCON DEBUG] Auth response received: id=${id}, type=${type}, body=${JSON.stringify(body)}, expectedAuthId=${this.authCb.id}`)
-      }
       // Auth_Response (type=2) 或 id=-1 → 最终认证结果
       if (type === 2 || id === -1) {
         const cb = this.authCb
