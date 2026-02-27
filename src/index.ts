@@ -707,7 +707,11 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     }
 
     try {
-      const rcon = await this.createRconWithTimeout(rconHost, rconPort, String(config.rconPassword ?? ''), rconTimeout)
+      const rconPassword = String(config.rconPassword ?? '')
+      if (this.debug) {
+        logger.info(`[DEBUG] RCON password detail: type=${typeof config.rconPassword}, length=${rconPassword.length}, value=${JSON.stringify(rconPassword)}`)
+      }
+      const rcon = await this.createRconWithTimeout(rconHost, rconPort, rconPassword, rconTimeout)
       this.rconConnections.set(selfId, rcon)
       bot.rcon = rcon
       this.rconReconnectAttempts.set(selfId, 0)
@@ -733,12 +737,13 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
   }
 
   private createRconWithTimeout(host: string, port: number, password: string, timeout: number): Promise<Rcon> {
+    const debug = this.debug
     return new Promise<Rcon>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error(`RCON TCP connection timeout after ${timeout}ms to ${host}:${port}`))
       }, timeout)
 
-      Rcon.connect({ host, port, password, timeout }).then(
+      Rcon.connect({ host, port, password, timeout, debug }).then(
         (rcon) => { clearTimeout(timer); resolve(rcon) },
         (err) => { clearTimeout(timer); reject(err) },
       )

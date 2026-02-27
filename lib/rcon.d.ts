@@ -3,6 +3,7 @@ export interface RconOptions {
     port?: number;
     password: string;
     timeout?: number;
+    debug?: boolean;
 }
 /**
  * 轻量级 Minecraft RCON 客户端
@@ -26,6 +27,7 @@ export declare class Rcon {
     private port;
     private password;
     private timeout;
+    private debug;
     constructor(options: RconOptions);
     static connect(options: RconOptions): Promise<Rcon>;
     on(event: string, listener: (...args: any[]) => void): void;
