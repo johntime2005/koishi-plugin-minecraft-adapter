@@ -38,15 +38,14 @@
     "adapter",
     "queqiao",
     "鹊桥",
-    "rcon",
     "websocket",
     "mc",
     "game"
   ],
   "koishi": {
     "description": {
-      "en": "Minecraft adapter for Koishi based on QueQiao V2 protocol, supports WebSocket events and RCON",
-      "zh": "基于鹊桥 V2 协议的 Koishi Minecraft 适配器，支持 WebSocket 事件和 RCON"
+      "en": "Minecraft adapter for Koishi based on QueQiao V2 protocol, supports WebSocket events",
+      "zh": "基于鹊桥 V2 协议的 Koishi Minecraft 适配器，支持 WebSocket 事件"
     },
     "service": {
       "implements": [

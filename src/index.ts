@@ -1,5 +1,4 @@
 import { Adapter, Bot, Context, h, Logger, MessageEncoder, Schema, Session } from 'koishi'
-import { Rcon } from './rcon'
 import WebSocket from 'ws'
 
 const logger = new Logger('minecraft')
@@ -195,18 +194,6 @@ export interface ServerConfig {
   /** 额外请求头 */
   extraHeaders?: Record<string, string>
 
-  // ---- RCON ----
-  /** 启用 RCON 远程命令执行 */
-  enableRcon?: boolean
-  /** RCON 主机地址 */
-  rconHost?: string
-  /** RCON 端口 */
-  rconPort?: number
-  /** RCON 密码 */
-  rconPassword?: string
-  /** RCON 超时时间(ms) */
-  rconTimeout?: number
-
   // ---- ChatImage ----
   /** 启用 ChatImage CICode 图片发送（需客户端安装 ChatImage Mod） */
   enableChatImage?: boolean
@@ -238,11 +225,6 @@ export interface MinecraftAdapterConfig {
   useMessagePrefix?: boolean
 }
 
-/**
- * 将嵌套格式的服务器配置扁平化。
- * 每种嵌套对象（websocket / rcon / chatImage）独立处理，
- * 确保任何混合格式（如扁平 url + 嵌套 rcon）都能正确转换。
- */
 function flattenServerConfig(server: any): ServerConfig {
   const result: any = { ...server }
 
@@ -253,21 +235,6 @@ function flattenServerConfig(server: any): ServerConfig {
     if (ws.accessToken !== undefined) result.accessToken = ws.accessToken
     if (ws.extraHeaders !== undefined) result.extraHeaders = ws.extraHeaders
     delete result.websocket
-  }
-
-  // ── rcon 嵌套 → 扁平 ──
-  if (result.rcon && typeof result.rcon === 'object') {
-    const rcon = result.rcon
-    const hasRconConfig = rcon.host || rcon.port || rcon.password
-    if (hasRconConfig || rcon.enabled) {
-      result.enableRcon = true
-    }
-    // 仅在嵌套值实际存在时覆盖，避免用 undefined 覆盖已有值或阻止 Schema 默认值
-    if (rcon.host !== undefined) result.rconHost = rcon.host
-    if (rcon.port !== undefined) result.rconPort = rcon.port
-    if (rcon.password !== undefined) result.rconPassword = rcon.password
-    if (rcon.timeout !== undefined) result.rconTimeout = rcon.timeout
-    delete result.rcon
   }
 
   // ── chatImage 嵌套 → 扁平 ──
@@ -283,11 +250,6 @@ function flattenServerConfig(server: any): ServerConfig {
   return result as ServerConfig
 }
 
-/**
- * 向后兼容：
- * 1. 将旧版 bots 字段迁移为 servers
- * 2. 将嵌套的 websocket/rcon/chatImage 子对象扁平化
- */
 function migrateConfig(raw: any): MinecraftAdapterConfig {
   let servers: any[] | undefined
 
@@ -326,7 +288,6 @@ function migrateConfig(raw: any): MinecraftAdapterConfig {
 // ============================================================================
 
 export class MinecraftBot<C extends Context = Context> extends Bot<C, ServerConfig> {
-  public rcon?: Rcon
   public ws?: WebSocket
   public chatImageEnabled: boolean
   public chatImageDefaultName: string
@@ -347,8 +308,7 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, ServerConf
     if (this.adapter instanceof MinecraftAdapter) {
       return await this.adapter.executeRconCommand(command, this)
     }
-    if (!this.rcon) throw new Error('RCON not connected')
-    return await this.rcon.send(command)
+    throw new Error('MinecraftAdapter not available')
   }
 }
 
@@ -359,9 +319,6 @@ export class MinecraftBot<C extends Context = Context> extends Bot<C, ServerConf
 export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, MinecraftBot<C>> {
   static reusable = true
 
-  private rconConnections = new Map<string, Rcon>()
-  private rconReconnectAttempts = new Map<string, number>()
-  private rconConfigs = new Map<string, ServerConfig>()
   /** @internal 供 MessageEncoder 访问 */
   wsConnections = new Map<string, WebSocket>()
   private reconnectAttempts = new Map<string, number>()
@@ -418,33 +375,16 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
           bot.adapter = this
           this.bots.push(bot)
 
-          const connectTasks: Promise<void>[] = []
-
-          // RCON（用于执行服务器命令，与 WebSocket 并行工作）
-          if (serverConfig.enableRcon) {
-            this.rconConfigs.set(serverConfig.selfId, serverConfig)
-            connectTasks.push(this.connectRcon(bot))
-          } else {
-            if (this.debug) {
-              logger.info(`[DEBUG] RCON not enabled for server ${serverConfig.selfId}`)
-            }
-          }
-
-          // WebSocket（用于事件接收和消息发送）
-          if (serverConfig.url) {
-            connectTasks.push((async () => {
-              if (this.debug) {
-                logger.info(`[DEBUG] Initializing WebSocket for server ${serverConfig.selfId}`)
-              }
-              await this.connectWebSocket(bot)
-            })())
-          } else {
+          if (!serverConfig.url) {
             if (this.debug) {
               logger.info(`[DEBUG] No WebSocket URL for server ${serverConfig.selfId}`)
             }
+            continue
           }
-
-          await Promise.allSettled(connectTasks)
+          if (this.debug) {
+            logger.info(`[DEBUG] Initializing WebSocket for server ${serverConfig.selfId}`)
+          }
+          await this.connectWebSocket(bot)
         }
       })
     } catch (err) {
@@ -680,100 +620,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       3: 'CLOSED'
     }
     return states[state as keyof typeof states] || `UNKNOWN(${state})`
-  }
-
-  private async connectRcon(bot: MinecraftBot<C>): Promise<void> {
-    // 优先使用 rconConfigs（经 migrateConfig 扁平化后的可靠配置），回退到 bot.config
-    const config = this.rconConfigs.get(bot.selfId) ?? bot.config
-    const selfId = bot.selfId
-    // rconHost 未配置时，从 WebSocket URL 中提取主机地址作为回退
-    let rconHost = config.rconHost
-    if (!rconHost && config.url) {
-      try {
-        rconHost = new URL(config.url).hostname
-      } catch {}
-    }
-    rconHost = rconHost || '127.0.0.1'
-    const rconPort = config.rconPort ?? 25575
-    const rconTimeout = config.rconTimeout ?? 5000
-    if (this.debug) {
-      logger.info(`[DEBUG] RCON config for server ${selfId}:`, {
-        rconHost: config.rconHost,
-        rconPort: config.rconPort,
-        rconPassword: config.rconPassword ? '***' : undefined,
-        rconTimeout: config.rconTimeout,
-        enableRcon: config.enableRcon,
-        resolved: `${rconHost}:${rconPort}`,
-      })
-    }
-
-    try {
-      const rconPassword = String(config.rconPassword ?? '')
-      const rcon = await this.createRconWithTimeout(rconHost, rconPort, rconPassword, rconTimeout)
-      this.rconConnections.set(selfId, rcon)
-      bot.rcon = rcon
-      this.rconReconnectAttempts.set(selfId, 0)
-      logger.info(`RCON connected for server ${selfId} — ready for command execution`)
-
-      rcon.on('end', () => {
-        logger.warn(`RCON connection lost for server ${selfId}`)
-        this.rconConnections.delete(selfId)
-        bot.rcon = undefined
-        this.scheduleRconReconnect(bot)
-      })
-
-      rcon.on('error', (error: Error) => {
-        logger.warn(`RCON error for server ${selfId}:`, error.message)
-      })
-    } catch (error) {
-      logger.warn(`Failed to connect RCON for server ${selfId}:`, error)
-      if (this.debug) {
-        logger.info(`[DEBUG] RCON connection error details:`, (error as Error).message, (error as Error).stack)
-      }
-      this.scheduleRconReconnect(bot)
-    }
-  }
-
-  private createRconWithTimeout(host: string, port: number, password: string, timeout: number): Promise<Rcon> {
-    const debug = this.debug
-    return new Promise<Rcon>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`RCON TCP connection timeout after ${timeout}ms to ${host}:${port}`))
-      }, timeout)
-
-      Rcon.connect({ host, port, password, timeout, debug }).then(
-        (rcon) => { clearTimeout(timer); resolve(rcon) },
-        (err) => { clearTimeout(timer); reject(err) },
-      )
-    })
-  }
-
-  private scheduleRconReconnect(bot: MinecraftBot<C>) {
-    const selfId = bot.selfId
-    if (!this.rconConfigs.has(selfId)) return
-    if (this.disposed) return
-
-    const attempts = this.rconReconnectAttempts.get(selfId) || 0
-    if (attempts >= this.maxReconnectAttempts) {
-      logger.error(`RCON max reconnect attempts (${this.maxReconnectAttempts}) reached for server ${selfId}`)
-      return
-    }
-
-    this.rconReconnectAttempts.set(selfId, attempts + 1)
-    const delay = this.reconnectInterval * Math.pow(2, Math.min(attempts, 5))
-
-    if (this.debug) {
-      logger.info(`[DEBUG] RCON reconnect for server ${selfId} in ${delay}ms (attempt ${attempts + 1}/${this.maxReconnectAttempts})`)
-    }
-
-    const timer = setTimeout(() => {
-      this.reconnectTimers.delete(timer)
-      if (this.disposed) return
-      if (!this.rconConfigs.has(selfId)) return
-      if (this.rconConnections.has(selfId)) return
-      this.connectRcon(bot)
-    }, delay)
-    this.reconnectTimers.add(timer)
   }
 
   private async connectWebSocket(bot: MinecraftBot<C>) {
@@ -1344,28 +1190,32 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
     }
 
     if (bot) {
-      const rcon = this.rconConnections.get(bot.selfId)
-      if (rcon) {
-        if (this.debug) {
-          logger.info(`[DEBUG] Executing via RCON for server ${bot.selfId}: ${command}`)
-        }
-        return await rcon.send(command)
+      const ws = this.wsConnections.get(bot.selfId)
+      if (ws?.readyState === WebSocket.OPEN) {
+        const response = await this.sendApiRequest<string>(ws, 'send_rcon_command', { command })
+        const data = response.data
+        if (data == null) return ''
+        return typeof data === 'string' ? data : JSON.stringify(data)
       }
-      throw new Error(`RCON not available for server ${bot.selfId}: no active RCON connection`)
+      throw new Error(`No active WebSocket connection for server ${bot.selfId}`)
     }
 
-    for (const [botId, rcon] of this.rconConnections) {
+    for (const [botId, ws] of this.wsConnections) {
+      if (ws.readyState !== WebSocket.OPEN) continue
       try {
         if (this.debug) {
-          logger.info(`[DEBUG] Executing via RCON for server ${botId}: ${command}`)
+          logger.info(`[DEBUG] Executing via WebSocket for server ${botId}: ${command}`)
         }
-        return await rcon.send(command)
+        const response = await this.sendApiRequest<string>(ws, 'send_rcon_command', { command })
+        const data = response.data
+        if (data == null) return ''
+        return typeof data === 'string' ? data : JSON.stringify(data)
       } catch (error) {
-        logger.warn(`Failed to execute RCON command for server ${botId}:`, error)
+        logger.warn(`Failed to execute RCON command via WebSocket for server ${botId}:`, error)
       }
     }
 
-    throw new Error('RCON not available: no active RCON connection to execute command')
+    throw new Error('No available WebSocket connection to execute command')
   }
 
   async sendTitle(
@@ -1466,16 +1316,6 @@ export class MinecraftAdapter<C extends Context = Context> extends Adapter<C, Mi
       }
     }
     this.wsConnections.clear()
-
-    this.rconConfigs.clear()
-    for (const [botId, rcon] of this.rconConnections) {
-      try {
-        rcon.end()
-      } catch (error) {
-        logger.warn(`Failed to close RCON for server ${botId}:`, error)
-      }
-    }
-    this.rconConnections.clear()
   }
 }
 
@@ -1579,16 +1419,10 @@ const serverSchema = Schema.object({
   url: Schema.string().description('WebSocket 地址（如 ws://127.0.0.1:8080）'),
   accessToken: Schema.string().description('访问令牌（需与鹊桥 config.yml 中的 access_token 一致）'),
   extraHeaders: Schema.dict(Schema.string()).description('额外请求头'),
-  enableRcon: Schema.boolean().description('启用 RCON 远程命令执行').default(false),
-  rconHost: Schema.string().description('RCON 主机地址（留空则自动取 WebSocket 地址中的主机）'),
-  rconPort: Schema.number().description('RCON 端口').default(25575),
-  rconPassword: Schema.string().description('RCON 密码（留空表示无密码）'),
-  rconTimeout: Schema.number().description('RCON 超时时间(ms)').default(5000),
   enableChatImage: Schema.boolean().description('启用 ChatImage CICode 图片发送（需客户端安装 ChatImage Mod）').default(false),
   chatImageDefaultName: Schema.string().description('图片在聊天栏中的默认显示名称').default('图片'),
   // 接受嵌套配置格式（README 文档中推荐的格式），由 flattenServerConfig 扁平化
   websocket: Schema.any().hidden(),
-  rcon: Schema.any().hidden(),
   chatImage: Schema.any().hidden(),
 })
 

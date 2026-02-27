@@ -1,12 +1,12 @@
 # koishi-plugin-minecraft-adapter
 
-Koishi 的 Minecraft 适配器插件，基于 [鹊桥 (QueQiao)](https://github.com/17TheWord/QueQiao) V2 协议，支持通过 WebSocket 和 RCON 与 Minecraft 服务器交互。
+Koishi 的 Minecraft 适配器插件，基于 [鹊桥 (QueQiao)](https://github.com/17TheWord/QueQiao) V2 协议，通过 WebSocket 与 Minecraft 服务器交互。
 
 ## 功能特性
 
 - **鹊桥 V2 协议**: 完整支持鹊桥 V2 WebSocket 协议
 - **WebSocket 连接**: 通过鹊桥 WebSocket Server 实时接收/发送事件和消息
-- **RCON 命令执行**: 通过 RCON 执行服务器命令，与 WebSocket 并行工作
+- **RCON 命令执行**: 通过鹊桥 WebSocket API `send_rcon_command` 执行服务器命令
 - **多服务器支持**: 通过 `servers` 数组配置多个 Minecraft 服务器，每个服务器独立运行
 - **完整事件支持**:
   - 玩家聊天 (`PlayerChatEvent`)
@@ -58,7 +58,6 @@ npm install koishi-plugin-minecraft-adapter
 | `selfId` | `string` | ✅ | 机器人唯一标识 |
 | `serverName` | `string` | ❌ | 服务器名称，**需与鹊桥 `config.yml` 中的 `server_name` 一致** |
 | `websocket` | `object` | ✅ | WebSocket 配置（用于事件接收和消息发送） |
-| `rcon` | `object` | ❌ | RCON 配置（用于执行服务器命令，与 WebSocket 并行工作） |
 | `chatImage` | `object` | ❌ | ChatImage 图片显示配置（仅对此服务器生效） |
 
 #### WebSocket 配置 (`servers[].websocket`)
@@ -69,16 +68,11 @@ npm install koishi-plugin-minecraft-adapter
 | `accessToken` | `string` | ❌ | 访问令牌（与鹊桥 `config.yml` 中的 `access_token` 一致） |
 | `extraHeaders` | `object` | ❌ | 额外请求头 |
 
-#### RCON 配置 (`servers[].rcon`)
+#### RCON（通过鹊桥 WebSocket）
 
-RCON 用于执行服务器命令（如 `/list`、`/ban` 等），与 WebSocket 并行工作，互不依赖。
+插件侧不再直连 TCP RCON。执行命令时会通过鹊桥 V2 WebSocket API `send_rcon_command` 发送。
 
-| 配置项 | 类型 | 必填 | 默认值 | 说明 |
-|--------|------|------|--------|------|
-| `host` | `string` | ❌ | `127.0.0.1` | RCON 主机地址 |
-| `port` | `number` | ❌ | `25575` | RCON 端口 |
-| `password` | `string` | ✅ | - | RCON 密码 |
-| `timeout` | `number` | ❌ | `5000` | 超时时间(ms) |
+RCON 的启用与密码/端口等配置请在鹊桥端 `config.yml` 中完成。
 
 #### ChatImage 配置 (`servers[].chatImage`)
 
@@ -102,10 +96,6 @@ plugins:
         websocket:
           url: 'ws://127.0.0.1:8080'
           accessToken: 'your_token'
-        rcon:
-          host: '127.0.0.1'
-          port: 25575
-          password: 'your_password'
         chatImage:
           enabled: true
           defaultImageName: '图片'
@@ -123,10 +113,6 @@ plugins:
         websocket:
           url: 'ws://192.168.1.10:8080'
           accessToken: 'token_survival'
-        rcon:
-          host: '192.168.1.10'
-          port: 25575
-          password: 'rcon_pass_1'
         chatImage:
           enabled: true
       - selfId: 'creative'
@@ -134,10 +120,6 @@ plugins:
         websocket:
           url: 'ws://192.168.1.11:8080'
           accessToken: 'token_creative'
-        rcon:
-          host: '192.168.1.11'
-          port: 25575
-          password: 'rcon_pass_2'
 ```
 
 ### 从旧版配置迁移
@@ -206,7 +188,7 @@ await bot.sendMessage('server-channel', '服务器即将重启')
 // 向指定玩家发送私聊消息
 await bot.sendPrivateMessage('Steve', '你好')
 
-// 执行 RCON 命令（通过 bot 的 RCON 连接执行）
+// 执行 RCON 命令（通过鹊桥 WebSocket API 执行）
 const result = await bot.executeCommand('list')
 ```
 
@@ -227,7 +209,7 @@ const result = await bot.executeCommand('list')
 |------|----------|------|
 | 广播消息 | `broadcast` | 向所有在线玩家广播 |
 | 私聊消息 | `send_private_msg` | 向指定玩家发送消息 |
-| RCON 命令 | `send_rcon_command` | 执行服务器命令（与 WebSocket 并行工作） |
+| RCON 命令 | `send_rcon_command` | 执行服务器命令 |
 | 标题显示 | `title` | 显示标题和副标题 |
 | 动画栏 | `action_bar` | 显示动画栏消息 |
 
@@ -236,7 +218,7 @@ const result = await bot.executeCommand('list')
 启用 `debug: true` 后会输出详细日志，包括：
 
 - 适配器初始化过程
-- WebSocket/RCON 连接状态
+- WebSocket 连接状态
 - 接收到的原始消息数据
 - 事件解析和会话创建过程
 - API 请求和响应

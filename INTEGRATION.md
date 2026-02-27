@@ -4,13 +4,13 @@
 
 ## 1. 概览
 - 对接双方：
-  - Koishi 插件端（本仓库 `minecraft-adapter`）——负责把 WebSocket / RCON 的 Minecraft 消息转成 Koishi Session，并把 Koishi 的出站消息发送回 Minecraft/QueQiao。
+  - Koishi 插件端（本仓库 `minecraft-adapter`）——负责把 WebSocket 的 Minecraft 消息转成 Koishi Session，并把 Koishi 的出站消息发送回 Minecraft/QueQiao。
   - QueQiao（鹊桥，Spigot 插件/服务端）——提供 WebSocket HTTP 接口与 Minecraft 服务端交互，接收广播/私聊/标题/动作条请求并在游戏内展示。
 
 ## 2. 总体数据流（简化）
 1. 玩家在服务器说话或事件触发 → QueQiao 将事件通过 WebSocket 转发给 Koishi 插件（作为 JSON payload）。
 2. 插件解析 payload —— 构建 Koishi Event/Session（关键是 `event.message.elements`），调用 `bot.dispatch(session)`。
-3. Koishi 产生回复 → 插件将回复序列化为兼容格式并通过 WebSocket 提交给 QueQiao；如果 WebSocket 不可用，则通过 RCON 发送 tellraw/say 等命令。
+3. Koishi 产生回复 → 插件将回复序列化为兼容格式并通过 WebSocket 提交给 QueQiao。
 4. QueQiao 将接收到的消息转换为 Spigot `TextComponent` 并调用 `spigot().broadcast()` 或私聊 API。 
 
 ## 3. 双方协定（契约）
@@ -37,11 +37,10 @@
     - 如果要支持复杂交互（click/hover），需按 QueQiao 的 MessageSegment schema 发送数组对象，但目前优先使用简单字符串以保证可靠性。
 - 认证与 headers：同上（x-self-name/Authorization）。
 
-### 3.3 RCON 回退
-- 当 WebSocket 无法发送时，使用 RCON 执行 `tellraw`（JSON 文本组件数组）或 `say`（简单文本）。
-- Adapter 将字符串/数组转换为 tellraw 所需的 text component 对象：
-  - 字符串项 → `{ "text": "..." }`
-  - 对象项（如果已构造）→ 直接用作 component
+### 3.3 RCON 命令（通过鹊桥 WebSocket API）
+- 插件侧不再直连 TCP RCON。
+- 执行服务器命令时，通过鹊桥 V2 WebSocket API `send_rcon_command` 发送命令。
+- RCON 的启用与密码/端口等配置请在鹊桥端 `config.yml` 中完成。
 
 ## 4. 关键字段与数据样例
 ### 4.1 入站示例（QueQiao -> Adapter）
@@ -101,7 +100,7 @@ Adapter 处理策略：若 `message` 为对象，尝试按优先级读取 `attrs
   - 要发送的原始 Koishi 输出（可能是 Element/MessageSegment）
   - `serializeOutgoingMessage` 的返回值（string | string[] | component[]）
   - WebSocket send 的最终 payload
-  - RCON fallback 使用的命令
+- RCON 使用的 API
 - 采样日志行（建议格式）：
 ```
 [2025-08-27T12:00:00Z] IN << {type: "asyncPlayerChatEvent", player: "Steve", message: "#help"}
@@ -121,7 +120,7 @@ Adapter 处理策略：若 `message` 为对象，尝试按优先级读取 `attrs
 ## 8. 测试矩阵（建议）
 - 场景 A：玩家发送 `#help`（纯文本） → Koishi 收到，发送回复为纯文本 → 验证游戏内可见。
 - 场景 B：Koishi 发送包含 click/hover 的组件（如果启用 `richComponents`）→ QueQiao 能否正确解析并在客户端展示交互。
-- 场景 C：WebSocket 不可用 → RCON 回退；验证 tellraw/say 文本在游戏内的展示情况。
+- 场景 C：仅 WebSocket；验证 `send_rcon_command` 在游戏端的执行结果。
 - 场景 D：中文/Emoji/特殊字符的 round-trip 测试。
 
 ## 9. 后续步骤（优先级）
